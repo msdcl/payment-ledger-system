@@ -132,10 +132,10 @@ public class PaymentEntity {
     
     /**
      * Converts entity to domain Payment object.
-     * 
+     *
      * @return Domain Payment object
      */
-    Payment toDomain() {
+    public Payment toDomain() {
         return new Payment(
             id,
             amount,

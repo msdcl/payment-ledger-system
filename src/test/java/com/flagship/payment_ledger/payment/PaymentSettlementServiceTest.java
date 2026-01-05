@@ -46,6 +46,10 @@ class PaymentSettlementServiceTest {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // Disable Kafka and outbox publisher for these tests
+        registry.add("spring.kafka.bootstrap-servers", () -> "localhost:9999");
+        registry.add("consumer.enabled", () -> "false");
+        registry.add("outbox.publisher.enabled", () -> "false");
     }
 
     @Autowired
@@ -112,7 +116,7 @@ class PaymentSettlementServiceTest {
             account2Id
         );
         
-        Payment saved = persistenceService.save(created, "test-key-" + UUID.randomUUID());
+        PaymentEntity saved = persistenceService.save(created, "test-key-" + UUID.randomUUID());
         authorizedPayment = paymentService.authorizePayment(saved.toDomain());
         persistenceService.update(authorizedPayment);
         
@@ -228,8 +232,8 @@ class PaymentSettlementServiceTest {
             account1Id,
             account2Id
         );
-        Payment saved = persistenceService.save(created, "test-key-" + UUID.randomUUID());
-        
+        PaymentEntity saved = persistenceService.save(created, "test-key-" + UUID.randomUUID());
+
         printInput("Payment ID", saved.getId());
         printInput("Payment Status", saved.getStatus());
         printExpectedException("IllegalStateException", 

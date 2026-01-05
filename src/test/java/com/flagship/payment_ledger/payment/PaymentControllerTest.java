@@ -66,6 +66,10 @@ class PaymentControllerTest {
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379).toString());
+        // Disable Kafka and outbox publisher for these tests
+        registry.add("spring.kafka.bootstrap-servers", () -> "localhost:9999");
+        registry.add("consumer.enabled", () -> "false");
+        registry.add("outbox.publisher.enabled", () -> "false");
     }
 
     @Autowired

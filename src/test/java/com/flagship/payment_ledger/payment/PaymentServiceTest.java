@@ -5,6 +5,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -13,16 +18,34 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Phase 2 Tests: Payment State Machine
- * 
+ *
  * These tests verify that:
  * - Valid state transitions work correctly
  * - Invalid state transitions are rejected
  * - State machine rules are enforced
- * 
+ *
  * Goal: Verify that status fields are not "just columns" but have explicit rules.
  */
 @SpringBootTest
+@Testcontainers
 class PaymentServiceTest {
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16")
+            .withDatabaseName("payment_ledger_test")
+            .withUsername("test")
+            .withPassword("test");
+
+    @DynamicPropertySource
+    static void configureProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+        // Disable Kafka and outbox publisher for these tests
+        registry.add("spring.kafka.bootstrap-servers", () -> "localhost:9999");
+        registry.add("consumer.enabled", () -> "false");
+        registry.add("outbox.publisher.enabled", () -> "false");
+    }
 
     @Autowired
     private PaymentService paymentService;

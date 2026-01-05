@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- Properties -->
+    <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="payment-ledger"/>
+
+    <!-- Console appender for development (human-readable) -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - [%X{correlationId:-no-correlation-id}] %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- JSON appender for production (structured logging) -->
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>correlationId</includeMdcKeyName>
+            <includeMdcKeyName>paymentId</includeMdcKeyName>
+            <includeMdcKeyName>accountId</includeMdcKeyName>
+            <includeMdcKeyName>eventId</includeMdcKeyName>
+            <includeMdcKeyName>eventType</includeMdcKeyName>
+
+            <!-- Custom fields -->
+            <customFields>{"service":"${appName}"}</customFields>
+
+            <!-- Timestamp format -->
+            <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSSZ</timestampPattern>
+
+            <!-- Include caller info for errors -->
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerThrowable>30</maxDepthPerThrowable>
+                <maxLength>2048</maxLength>
+                <shortenedClassNameLength>20</shortenedClassNameLength>
+                <exclude>sun\.reflect\..*\.invoke.*</exclude>
+                <exclude>net\.sf\.cglib\.proxy\.MethodProxy\.invoke</exclude>
+                <rootCauseFirst>true</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+    </appender>
+
+    <!-- Async wrapper for JSON appender (non-blocking logging) -->
+    <appender name="ASYNC_JSON" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="JSON"/>
+        <queueSize>512</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <includeCallerData>false</includeCallerData>
+        <neverBlock>true</neverBlock>
+    </appender>
+
+    <!-- Default profile: human-readable console output -->
+    <springProfile name="default,dev,test">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+
+        <!-- Application logging -->
+        <logger name="com.flagship.payment_ledger" level="DEBUG" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+        </logger>
+
+        <!-- Reduce noise from frameworks -->
+        <logger name="org.springframework.kafka" level="WARN"/>
+        <logger name="org.apache.kafka" level="WARN"/>
+        <logger name="org.hibernate" level="WARN"/>
+        <logger name="org.springframework.data" level="WARN"/>
+    </springProfile>
+
+    <!-- Production profile: JSON structured logging -->
+    <springProfile name="production,prod">
+        <root level="INFO">
+            <appender-ref ref="ASYNC_JSON"/>
+        </root>
+
+        <!-- Application logging at INFO in production -->
+        <logger name="com.flagship.payment_ledger" level="INFO" additivity="false">
+            <appender-ref ref="ASYNC_JSON"/>
+        </logger>
+
+        <!-- Reduce framework noise -->
+        <logger name="org.springframework.kafka" level="WARN"/>
+        <logger name="org.apache.kafka" level="WARN"/>
+        <logger name="org.hibernate" level="WARN"/>
+        <logger name="org.springframework.data" level="WARN"/>
+        <logger name="io.lettuce" level="WARN"/>
+    </springProfile>
+
+</configuration>

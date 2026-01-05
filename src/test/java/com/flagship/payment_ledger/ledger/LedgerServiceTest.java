@@ -43,6 +43,10 @@ class LedgerServiceTest {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // Disable Kafka and outbox publisher for these tests
+        registry.add("spring.kafka.bootstrap-servers", () -> "localhost:9999");
+        registry.add("consumer.enabled", () -> "false");
+        registry.add("outbox.publisher.enabled", () -> "false");
     }
 
     @Autowired
