@@ -1,0 +1,13 @@
+.gradle
+build
+gradle
+gradlew
+gradlew.bat
+.git
+.gitignore
+README.md
+.vscode
+.idea
+*.md
+.DS_Store
+src/test
