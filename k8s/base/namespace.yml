@@ -1,0 +1,31 @@
+# =============================================================================
+# Namespace - Logical Isolation for Your Application
+# =============================================================================
+#
+# WHAT: A namespace is like a "folder" in Kubernetes. All resources for
+# payment-ledger (pods, services, secrets) live in this namespace.
+#
+# WHY:
+# 1. Organization: `kubectl get pods -n payment-ledger` shows only YOUR pods
+# 2. Isolation: Resource quotas can limit this namespace to X CPU, Y RAM
+# 3. Access control: RBAC can restrict who can access this namespace
+# 4. Cleanup: `kubectl delete namespace payment-ledger` removes EVERYTHING in it
+#
+# REAL-WORLD PATTERNS:
+# - Per-environment: dev, staging, prod namespaces on same cluster
+# - Per-team: team-payments, team-orders (each team manages their namespace)
+# - Per-tenant: In multi-tenant SaaS, each customer gets a namespace
+#
+# DEFAULT NAMESPACES (already exist in every cluster):
+# - `default`: Where resources go if you don't specify a namespace
+# - `kube-system`: K8s internal components (API server, DNS, etc.)
+# - `kube-public`: Publicly readable (rarely used)
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payment-ledger
+  labels:
+    app.kubernetes.io/part-of: payment-ledger
+    # Labels are key-value pairs for organizing and selecting resources.
+    # The "app.kubernetes.io/" prefix is a K8s convention for standard labels.

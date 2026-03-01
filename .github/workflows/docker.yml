@@ -1,0 +1,241 @@
+# =============================================================================
+# Docker Build & Push Workflow
+# =============================================================================
+#
+# WHAT THIS DOES:
+# When code is merged to master (and CI passes), this workflow:
+# 1. Builds the Docker image
+# 2. Tags it with the git SHA and "latest"
+# 3. Pushes it to GitHub Container Registry (ghcr.io)
+#
+# WHY A SEPARATE WORKFLOW?
+# CI (testing) and Docker build (packaging) are separate concerns:
+# - CI runs on every push and PR (fast feedback)
+# - Docker build only runs on master merge (creates a deployable artifact)
+#
+# This follows the "build once, deploy everywhere" principle:
+# The exact same image that passes CI is what gets deployed to dev, staging, prod.
+#
+# REAL-WORLD FLOW:
+# Developer pushes → CI tests → Merge to master → Docker build → Push to registry
+# → Kubernetes pulls the image → Deployment happens
+#
+# =============================================================================
+
+name: Docker Build & Push
+
+on:
+  # ---------------------------------------------------------------------------
+  # CHAINED TRIGGER: Run only after CI passes
+  # ---------------------------------------------------------------------------
+  # Instead of triggering on push (which runs in parallel with CI), we use
+  # workflow_run to wait for CI to succeed first. This creates the chain:
+  #   Push → CI Pipeline → Docker Build → CD Pipeline
+  #
+  # Without this, a push to master would start CI and Docker simultaneously.
+  # Docker might push a broken image before CI discovers the tests fail.
+  #
+  # REAL-WORLD: This pattern is common at companies with strict release
+  # pipelines. The alternative is to put everything in one workflow file,
+  # but separate files are easier to maintain and debug.
+  # ---------------------------------------------------------------------------
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+    branches: [master, main]
+  # Allow manual trigger for debugging
+  workflow_dispatch:
+
+# ---------------------------------------------------------------------------
+# ENVIRONMENT VARIABLES
+# ---------------------------------------------------------------------------
+# These are available to ALL jobs in this workflow.
+# Using env vars here avoids repeating the registry/image name everywhere.
+# ---------------------------------------------------------------------------
+env:
+  REGISTRY: ghcr.io
+  # github.repository = "msdcl/payment-ledger-system"
+  # This becomes the image name: ghcr.io/msdcl/payment-ledger-system
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    # Only run if CI succeeded (or manual dispatch)
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+
+    # ---------------------------------------------------------------------------
+    # PERMISSIONS
+    # ---------------------------------------------------------------------------
+    # GitHub Actions uses OIDC tokens for authentication. To push to ghcr.io,
+    # the workflow needs write access to packages.
+    #
+    # WHY EXPLICIT PERMISSIONS?
+    # Principle of least privilege - only grant what's needed. This is a
+    # security best practice. If a malicious action tried to do something
+    # unexpected, limited permissions would prevent it.
+    #
+    # REAL-WORLD: In enterprise, these permissions are often controlled by
+    # organization-level policies. Some companies require approval for
+    # workflows that request write permissions.
+    # ---------------------------------------------------------------------------
+    permissions:
+      contents: read       # Read repo contents (checkout)
+      packages: write      # Push to GitHub Container Registry
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # DOCKER BUILDX
+      # -----------------------------------------------------------------------
+      # Buildx is Docker's next-generation build system. It supports:
+      # - Multi-platform builds (build for ARM64 and AMD64 in one command)
+      # - Better caching (cache layers in the registry itself)
+      # - Build attestations (provenance tracking)
+      #
+      # REAL-WORLD: Multi-platform builds are crucial. Your M1 Mac builds
+      # ARM64 images, but most Kubernetes clusters run AMD64. Buildx lets
+      # you build for both platforms from a single Dockerfile.
+      # -----------------------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # REGISTRY LOGIN
+      # -----------------------------------------------------------------------
+      # Authenticates with ghcr.io using the GitHub-provided token.
+      # `github.token` is automatically available in every workflow - you
+      # don't need to create a secret for it.
+      #
+      # For Docker Hub, you'd use your Docker Hub username/password instead
+      # (stored as GitHub Secrets).
+      # -----------------------------------------------------------------------
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # DOCKER METADATA (TAGS & LABELS)
+      # -----------------------------------------------------------------------
+      # This action automatically generates smart tags for your image:
+      #
+      # - `type=sha`: Tags with the git commit SHA (e.g., ghcr.io/msdcl/payment-ledger-system:sha-abc1234)
+      #   WHY? So you can always trace a running container back to exact code.
+      #   "What version is running in prod?" → check the image tag → find the commit.
+      #
+      # - `type=raw,value=latest`: Tags with "latest" for convenience.
+      #   WARNING: "latest" is NOT a version - it just means "the most recent push."
+      #   In production, NEVER use "latest" - always use a specific tag (SHA or semver).
+      #   "latest" is fine for dev environments.
+      #
+      # REAL-WORLD TAGGING STRATEGIES:
+      # - Git SHA: Most reliable, always unique (ghcr.io/app:sha-abc1234)
+      # - Semantic versioning: For releases (ghcr.io/app:v1.2.3)
+      # - Branch name: For dev environments (ghcr.io/app:feature-xyz)
+      # -----------------------------------------------------------------------
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      # -----------------------------------------------------------------------
+      # BUILD AND PUSH
+      # -----------------------------------------------------------------------
+      # This single step builds AND pushes the image.
+      #
+      # `cache-from` and `cache-to`: Uses GitHub Actions cache to store Docker
+      # build layers. On subsequent builds, unchanged layers are reused instead
+      # of being rebuilt. This can cut build time from 5 minutes to 30 seconds.
+      #
+      # HOW DOCKER LAYER CACHING WORKS:
+      # Each line in your Dockerfile creates a "layer." If a layer hasn't
+      # changed since the last build, Docker reuses the cached version.
+      # That's why we COPY build.gradle before COPY src - dependencies change
+      # less often than source code, so the dependency download layer gets cached.
+      # -----------------------------------------------------------------------
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # -----------------------------------------------------------------------
+      # VULNERABILITY SCANNING (Trivy)
+      # -----------------------------------------------------------------------
+      # Trivy scans your Docker image for known vulnerabilities (CVEs) in:
+      # - OS packages (apt/apk packages in the base image)
+      # - Application dependencies (Java JARs, npm packages, etc.)
+      #
+      # WHY SCAN IN CI?
+      # Vulnerabilities are constantly discovered. An image built last week
+      # might have a critical CVE today. Scanning in CI catches these before
+      # they reach production.
+      #
+      # SEVERITY LEVELS:
+      # - CRITICAL: Remote code execution, data exfiltration (fix immediately)
+      # - HIGH: Significant security impact (fix within days)
+      # - MEDIUM/LOW: Minor issues (fix when convenient)
+      #
+      # We fail the build on CRITICAL vulnerabilities only. Blocking on
+      # HIGH would cause too many false positives from transitive dependencies
+      # you don't control.
+      #
+      # REAL-WORLD: Most companies scan at two points:
+      # 1. In CI (what we do) - catch issues before deployment
+      # 2. In the registry (continuous) - catch new CVEs in existing images
+      # Tools: Trivy, Snyk, Grype, AWS ECR scanning, Docker Scout
+      # -----------------------------------------------------------------------
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: 'table'
+          exit-code: '1'           # Fail the build if vulnerabilities found
+          severity: 'CRITICAL'     # Only fail on CRITICAL (HIGH causes too many false positives)
+          ignore-unfixed: true     # Skip CVEs that don't have a fix yet
+
+      - name: Upload Trivy scan results
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload scan results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      # -----------------------------------------------------------------------
+      # SUMMARY
+      # -----------------------------------------------------------------------
+      # Outputs a nice summary in the GitHub Actions run page showing
+      # exactly which image tags were pushed. Useful for auditing.
+      # -----------------------------------------------------------------------
+      - name: Image digest
+        run: |
+          echo "## Docker Image Published 🐳" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

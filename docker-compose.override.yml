@@ -1,0 +1,33 @@
+# =============================================================================
+# Docker Compose Override - Developer Conveniences
+# =============================================================================
+#
+# HOW OVERRIDES WORK:
+# Docker Compose automatically merges this file with docker-compose.yml.
+# You don't need to specify it - just run `docker compose up` as usual.
+#
+# Merge order: docker-compose.yml → docker-compose.override.yml
+# If both define the same setting, the override wins.
+#
+# WHY SEPARATE FILES?
+# - docker-compose.yml = shared, production-like base (committed to git)
+# - docker-compose.override.yml = personal dev tweaks (can be gitignored)
+#
+# REAL-WORLD: Some teams have:
+# - docker-compose.yml          (base)
+# - docker-compose.override.yml (local dev - gitignored)
+# - docker-compose.test.yml     (CI testing - committed)
+# - docker-compose.prod.yml     (production - committed)
+#
+# To use a specific file: docker compose -f docker-compose.yml -f docker-compose.test.yml up
+# =============================================================================
+
+services:
+  app:
+    environment:
+      # Enable remote debugging - attach your IDE debugger to port 5005
+      # This is invaluable when debugging issues in the containerized app
+      JAVA_OPTS: "-Xms256m -Xmx512m -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+    ports:
+      - "8050:8050"   # Application
+      - "5005:5005"   # Java remote debug port

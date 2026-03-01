@@ -2,6 +2,9 @@ plugins {
 	id 'java'
 	id 'org.springframework.boot' version '3.5.9'
 	id 'io.spring.dependency-management' version '1.1.7'
+	// JaCoCo: Java Code Coverage - built into Gradle, no external dependency needed
+	// Instruments bytecode to track which lines/branches are executed during tests
+	id 'jacoco'
 }
 
 group = 'com.flagship'
@@ -66,4 +69,44 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+	// Tell Gradle to generate JaCoCo coverage data after tests run
+	finalizedBy jacocoTestReport
+}
+
+// =============================================================================
+// JaCoCo Configuration
+// =============================================================================
+// JaCoCo generates two types of reports:
+// - HTML: Human-readable, open in browser (build/reports/jacoco/test/html/index.html)
+// - XML: Machine-readable, used by CI tools and coverage services (Codecov, SonarQube)
+//
+// The `jacocoTestCoverageVerification` task enforces minimum coverage thresholds.
+// If coverage drops below the threshold, the build FAILS. This prevents
+// "coverage erosion" where developers slowly stop writing tests.
+// =============================================================================
+jacocoTestReport {
+	dependsOn test
+	reports {
+		xml.required = true      // For CI tools (Codecov, SonarQube, GitHub Actions)
+		html.required = true     // For human review (open in browser)
+		csv.required = false     // Rarely needed
+	}
+}
+
+jacocoTestCoverageVerification {
+	violationRules {
+		rule {
+			// Enforce minimum 30% line coverage across the project
+			// Start low and gradually increase as you fix/add more tests
+			// Most mature projects aim for 70-80%
+			limit {
+				minimum = 0.30
+			}
+		}
+	}
+}
+
+// Make the `check` task (which `build` depends on) also verify coverage
+tasks.named('check') {
+	dependsOn jacocoTestCoverageVerification
 }

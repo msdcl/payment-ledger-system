@@ -1,0 +1,96 @@
+# =============================================================================
+# Dev Overlay - Development Environment Configuration
+# =============================================================================
+#
+# WHAT THIS DOES:
+# Inherits ALL resources from base, then applies dev-specific patches:
+# - 1 replica (save resources on dev cluster)
+# - DEBUG logging (more verbose for troubleshooting)
+# - Smaller resource limits (dev doesn't need production-grade resources)
+# - "dev" label on all resources (for filtering)
+#
+# HOW TO USE:
+#   kubectl apply -k k8s/overlays/dev/       # Deploy to dev
+#   kubectl kustomize k8s/overlays/dev/       # Preview without deploying
+#   kubectl diff -k k8s/overlays/dev/         # See what would change
+#
+# REAL-WORLD:
+# Dev environments are often shared by the team. Each developer might also
+# have their own namespace (dev-alice, dev-bob) using the same overlay
+# with a namespace override.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Inherit from base - this is the key concept of overlays
+resources:
+  - ../../base
+
+# Override the namespace for this environment
+# All resources from base will be placed in this namespace instead
+namespace: payment-ledger
+
+# Add environment-specific labels to ALL resources
+# IMPORTANT: includeSelectors is FALSE here! Environment labels go on
+# metadata only, NOT on selectors. Why?
+# - spec.selector on Deployments/StatefulSets is IMMUTABLE after creation
+# - If you add a new label to selectors, K8s rejects the update
+# - Selectors should only contain stable identity labels (set once at creation)
+# - Environment labels are for filtering/querying, not pod selection
+labels:
+  - pairs:
+      environment: dev
+
+# Patches modify specific fields in base resources
+patches:
+  # -----------------------------------------------------------------------
+  # Patch 1: Reduce app replicas to 1 for dev
+  # -----------------------------------------------------------------------
+  # This is a "strategic merge patch" - Kustomize finds the Deployment
+  # with name "payment-ledger" and merges this partial spec into it.
+  # Only the fields specified here are changed; everything else stays.
+  # -----------------------------------------------------------------------
+  - target:
+      kind: Deployment
+      name: payment-ledger
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: payment-ledger
+      spec:
+        replicas: 1
+        template:
+          spec:
+            containers:
+              - name: payment-ledger
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "256Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "512Mi"
+
+  # -----------------------------------------------------------------------
+  # Patch 2: Override ConfigMap values for dev
+  # -----------------------------------------------------------------------
+  # WHY A PATCH INSTEAD OF configMapGenerator?
+  # Our base defines the ConfigMap as a raw resource (not via a generator).
+  # Kustomize's configMapGenerator with "behavior: merge" only works when
+  # the base ALSO uses a configMapGenerator. Since our base has a plain
+  # ConfigMap resource, we use a strategic merge patch to override specific
+  # data keys. This is actually the more common pattern in real-world
+  # Kustomize setups.
+  # -----------------------------------------------------------------------
+  - target:
+      kind: ConfigMap
+      name: payment-ledger-config
+    patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: payment-ledger-config
+      data:
+        LOGGING_LEVEL_COM_FLAGSHIP: "DEBUG"
+        JAVA_OPTS: "-Xms128m -Xmx256m"

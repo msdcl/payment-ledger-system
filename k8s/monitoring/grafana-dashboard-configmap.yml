@@ -1,0 +1,315 @@
+# =============================================================================
+# Grafana Dashboard - Provisioned via ConfigMap
+# =============================================================================
+#
+# HOW DASHBOARD PROVISIONING WORKS:
+# The kube-prometheus-stack chart runs a "sidecar" container alongside Grafana.
+# This sidecar watches for ConfigMaps with the label "grafana_dashboards=1"
+# across the cluster. When it finds one, it:
+# 1. Extracts the JSON dashboard definition from the ConfigMap
+# 2. Writes it to Grafana's provisioning directory
+# 3. Grafana auto-loads it (no restart needed)
+#
+# WHY PROVISION AS CODE?
+# - Dashboards survive Grafana pod restarts (Grafana's internal SQLite is ephemeral)
+# - Dashboards are version-controlled in Git
+# - Same dashboard deploys to every environment automatically
+# - No manual "export → import" workflow
+#
+# REAL-WORLD:
+# Teams typically design dashboards in Grafana's UI first (easier to iterate),
+# then export the JSON and commit it as a ConfigMap for GitOps deployment.
+# The JSON format below is Grafana's native dashboard model.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-ledger-dashboard
+  namespace: monitoring
+  labels:
+    # This label tells the Grafana sidecar to pick up this ConfigMap
+    # Note: the label is "grafana_dashboard" (singular) - check your chart's
+    # sidecar config if dashboards aren't loading
+    grafana_dashboard: "1"
+data:
+  payment-ledger-dashboard.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 100,
+          "title": "Payment Operations",
+          "type": "row"
+        },
+        {
+          "title": "Payment Throughput (per second)",
+          "description": "Rate of payments created, settled, authorized, and failed",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "id": 1,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 }
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "failed" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "settled" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "authorized" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] }
+            ]
+          },
+          "targets": [
+            { "expr": "rate(payment_total{job=\"payment-ledger\"}[5m])", "legendFormat": "created" },
+            { "expr": "rate(payment_settled_total{job=\"payment-ledger\"}[5m])", "legendFormat": "settled" },
+            { "expr": "rate(payment_authorized_total{job=\"payment-ledger\"}[5m])", "legendFormat": "authorized" },
+            { "expr": "rate(payment_failed_total{job=\"payment-ledger\"}[5m])", "legendFormat": "failed" }
+          ]
+        },
+        {
+          "title": "Payment API Latency (p50 / p95 / p99)",
+          "description": "Response time percentiles for payment API endpoints",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "id": 2,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 5, "lineWidth": 2 }
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "p99" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "p95" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "p50" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+            ]
+          },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, rate(payment_api_duration_seconds_bucket{job=\"payment-ledger\"}[5m]))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, rate(payment_api_duration_seconds_bucket{job=\"payment-ledger\"}[5m]))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, rate(payment_api_duration_seconds_bucket{job=\"payment-ledger\"}[5m]))", "legendFormat": "p99" }
+          ]
+        },
+        {
+          "title": "Duplicate Requests",
+          "description": "Idempotency key collisions - requests that were deduplicated",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 9 },
+          "id": 3,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 10 }, { "color": "red", "value": 100 }] } } },
+          "targets": [
+            { "expr": "payment_duplicate_requests_total{job=\"payment-ledger\"}", "legendFormat": "duplicates" }
+          ]
+        },
+        {
+          "title": "Settlement Duration",
+          "description": "Time to settle payments (p50/p99)",
+          "type": "timeseries",
+          "gridPos": { "h": 4, "w": 8, "x": 4, "y": 9 },
+          "id": 4,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 5 } } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, rate(payment_settlement_duration_seconds_bucket{job=\"payment-ledger\"}[5m]))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.99, rate(payment_settlement_duration_seconds_bucket{job=\"payment-ledger\"}[5m]))", "legendFormat": "p99" }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+          "id": 101,
+          "title": "Outbox Pattern",
+          "type": "row"
+        },
+        {
+          "title": "Outbox Backlog Size",
+          "description": "Number of events waiting to be published. Growing backlog = Kafka publishing is falling behind.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "id": 5,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "fillOpacity": 20, "lineWidth": 2 },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 100 }, { "color": "red", "value": 1000 }]
+              },
+              "color": { "mode": "thresholds" }
+            }
+          },
+          "targets": [
+            { "expr": "outbox_backlog_size{job=\"payment-ledger\"}", "legendFormat": "backlog size" }
+          ]
+        },
+        {
+          "title": "Outbox Backlog Age",
+          "description": "Age of oldest unprocessed event. High age = events stuck in outbox.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 14 },
+          "id": 6,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 10 } } },
+          "targets": [
+            { "expr": "outbox_backlog_age_seconds{job=\"payment-ledger\"}", "legendFormat": "oldest event age" }
+          ]
+        },
+        {
+          "title": "Outbox Failed Events",
+          "description": "Events that failed to publish to Kafka",
+          "type": "stat",
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 14 },
+          "id": 7,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
+          "targets": [
+            { "expr": "outbox_events_failed{job=\"payment-ledger\"}", "legendFormat": "failed events" }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+          "id": 102,
+          "title": "HTTP Server",
+          "type": "row"
+        },
+        {
+          "title": "HTTP Request Rate by Status",
+          "description": "Request throughput grouped by HTTP status code",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+          "id": 8,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 2 } },
+            "overrides": [
+              { "matcher": { "id": "byRegexp", "options": "5.." }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+              { "matcher": { "id": "byRegexp", "options": "4.." }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+              { "matcher": { "id": "byRegexp", "options": "2.." }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+            ]
+          },
+          "targets": [
+            { "expr": "sum by (status) (rate(http_server_requests_seconds_count{job=\"payment-ledger\"}[5m]))", "legendFormat": "{{status}}" }
+          ]
+        },
+        {
+          "title": "HTTP Latency by Endpoint",
+          "description": "p95 latency per URI",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+          "id": 9,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 5 } } },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket{job=\"payment-ledger\", uri!~\"/actuator.*\"}[5m])))", "legendFormat": "{{uri}}" }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+          "id": 103,
+          "title": "JVM & Infrastructure",
+          "type": "row"
+        },
+        {
+          "title": "JVM Heap Memory",
+          "description": "Heap memory usage - if this approaches limits, you'll get OOM kills",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+          "id": 10,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "fillOpacity": 20 } } },
+          "targets": [
+            { "expr": "jvm_memory_used_bytes{job=\"payment-ledger\", area=\"heap\"}", "legendFormat": "used ({{id}})" },
+            { "expr": "jvm_memory_max_bytes{job=\"payment-ledger\", area=\"heap\"}", "legendFormat": "max ({{id}})" }
+          ]
+        },
+        {
+          "title": "JVM GC Pauses",
+          "description": "Garbage collection pause time - high GC = app is struggling with memory",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+          "id": 11,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 10, "drawStyle": "bars" } } },
+          "targets": [
+            { "expr": "rate(jvm_gc_pause_seconds_sum{job=\"payment-ledger\"}[5m])", "legendFormat": "{{action}} ({{cause}})" }
+          ]
+        },
+        {
+          "title": "JVM Threads",
+          "description": "Thread count - sudden increases may indicate thread leaks",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+          "id": 12,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } } },
+          "targets": [
+            { "expr": "jvm_threads_live_threads{job=\"payment-ledger\"}", "legendFormat": "live" },
+            { "expr": "jvm_threads_daemon_threads{job=\"payment-ledger\"}", "legendFormat": "daemon" },
+            { "expr": "jvm_threads_peak_threads{job=\"payment-ledger\"}", "legendFormat": "peak" }
+          ]
+        },
+        {
+          "title": "HikariCP Connection Pool",
+          "description": "Database connection pool - watch for exhaustion (active = max = trouble)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+          "id": 13,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } } },
+          "targets": [
+            { "expr": "hikaricp_connections_active{job=\"payment-ledger\"}", "legendFormat": "active" },
+            { "expr": "hikaricp_connections_idle{job=\"payment-ledger\"}", "legendFormat": "idle" },
+            { "expr": "hikaricp_connections_max{job=\"payment-ledger\"}", "legendFormat": "max" },
+            { "expr": "hikaricp_connections_pending{job=\"payment-ledger\"}", "legendFormat": "pending (waiting)" }
+          ]
+        },
+        {
+          "title": "Kafka Producer Records",
+          "description": "Rate of records sent to Kafka and errors",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+          "id": 14,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "errors" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+            ]
+          },
+          "targets": [
+            { "expr": "rate(kafka_producer_record_send_total{job=\"payment-ledger\"}[5m])", "legendFormat": "sent" },
+            { "expr": "rate(kafka_producer_record_error_total{job=\"payment-ledger\"}[5m])", "legendFormat": "errors" }
+          ]
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["payment-ledger", "spring-boot"],
+      "templating": {
+        "list": [
+          {
+            "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+            "hide": 0,
+            "includeAll": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "type": "datasource"
+          }
+        ]
+      },
+      "time": { "from": "now-1h", "to": "now" },
+      "title": "Payment Ledger",
+      "uid": "payment-ledger-main"
+    }

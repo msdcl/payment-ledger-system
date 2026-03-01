@@ -1,0 +1,133 @@
+# =============================================================================
+# Custom Values for kube-prometheus-stack Helm Chart
+# =============================================================================
+#
+# HOW HELM VALUES WORK:
+# Every Helm chart has a default values.yaml with hundreds of settings.
+# Instead of editing that file directly, you create your own values file
+# that OVERRIDES only the settings you want to change. Everything else
+# uses the chart's defaults.
+#
+# This is the same "override" pattern as Kustomize overlays - define
+# defaults once, customize per-environment.
+#
+# TO SEE ALL AVAILABLE VALUES:
+#   helm show values prometheus-community/kube-prometheus-stack | less
+#
+# REAL-WORLD:
+# In production, teams often have separate values files per environment:
+#   values-dev.yml, values-staging.yml, values-prod.yml
+# Combined with Helm's -f flag: helm install ... -f values-prod.yml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# GRAFANA CONFIGURATION
+# ---------------------------------------------------------------------------
+# Grafana is the visualization layer - it queries Prometheus and renders
+# dashboards. Think of Prometheus as the database and Grafana as the UI.
+# ---------------------------------------------------------------------------
+grafana:
+  # Admin credentials for Grafana login
+  # In production, use a K8s Secret or external secret manager (Vault, AWS SSM)
+  adminUser: admin
+  adminPassword: admin
+
+  # Service type: NodePort makes Grafana accessible from outside the cluster
+  # In production, you'd use an Ingress with TLS instead
+  service:
+    type: NodePort
+    nodePort: 31000
+
+  # NOTE: The chart already auto-provisions a Prometheus datasource in Grafana.
+  # Don't add a custom one here - it causes "only one default datasource"
+  # errors. The chart knows the correct Prometheus service URL internally.
+
+# ---------------------------------------------------------------------------
+# PROMETHEUS CONFIGURATION
+# ---------------------------------------------------------------------------
+# Prometheus is a pull-based monitoring system. Instead of apps pushing
+# metrics TO Prometheus, Prometheus PULLS (scrapes) metrics FROM apps.
+#
+# This is the opposite of tools like StatsD/Datadog where apps push metrics.
+# Pull-based has advantages:
+# - Prometheus controls the scrape rate (no metric flooding)
+# - If an app is down, Prometheus knows immediately (failed scrape)
+# - Apps just expose an HTTP endpoint, no client SDK needed
+# ---------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # How long to keep metrics data. 7 days is good for dev/staging.
+    # Production typically uses 15-30 days locally + long-term storage
+    # (Thanos, Cortex, or Grafana Mimir) for months/years of data.
+    retention: 7d
+
+    # Storage for metrics data
+    # Without this, metrics are lost on pod restart (stored in emptyDir)
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+
+    # Resource limits for the Prometheus server
+    # Prometheus is memory-hungry - it keeps recent data in RAM for fast queries.
+    # Rule of thumb: ~2 bytes per sample, so 100k active time series
+    # with 15s scrape interval ≈ 1-2 GB RAM
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+    # CRITICAL: Tell Prometheus to watch ALL namespaces for ServiceMonitors
+    # By default, it only watches its own namespace. Without this,
+    # Prometheus won't discover your payment-ledger ServiceMonitor.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+# ---------------------------------------------------------------------------
+# ALERTMANAGER CONFIGURATION
+# ---------------------------------------------------------------------------
+# Alertmanager receives alerts from Prometheus and routes them to the
+# right channel (Slack, PagerDuty, email). It also handles:
+# - Grouping: combine related alerts into one notification
+# - Silencing: temporarily mute alerts during maintenance
+# - Inhibition: suppress alerts if a higher-severity alert is already firing
+# ---------------------------------------------------------------------------
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# NODE EXPORTER
+# ---------------------------------------------------------------------------
+# Collects host-level metrics (CPU, memory, disk, network) from each node.
+# Runs as a DaemonSet (one pod per node). Useful for capacity planning
+# and detecting node-level issues. Disable in resource-constrained dev.
+# ---------------------------------------------------------------------------
+nodeExporter:
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# KUBE-STATE-METRICS
+# ---------------------------------------------------------------------------
+# Exposes K8s object states as Prometheus metrics:
+# - kube_deployment_status_replicas_available
+# - kube_pod_status_phase
+# - kube_node_status_condition
+# This is how you alert on "deployment has 0 available replicas" or
+# "pod in CrashLoopBackOff for more than 5 minutes"
+# ---------------------------------------------------------------------------
+kubeStateMetrics:
+  enabled: true

@@ -1,0 +1,42 @@
+# =============================================================================
+# Headless Service for PostgreSQL
+# =============================================================================
+#
+# WHAT IS A HEADLESS SERVICE?
+# A normal Service has a ClusterIP - traffic is load-balanced across pods.
+# A headless Service (clusterIP: None) does NOT load-balance. Instead, DNS
+# returns the individual pod IPs directly.
+#
+# WHY HEADLESS FOR DATABASES?
+# With a database, you often need to talk to a SPECIFIC instance:
+# - "Connect to the primary for writes" (postgres-0)
+# - "Connect to the replica for reads" (postgres-1)
+# Load balancing would randomly send writes to a read-only replica → errors.
+#
+# DNS RESOLUTION:
+# - postgres.payment-ledger.svc → returns IPs of ALL postgres pods
+# - postgres-0.postgres.payment-ledger.svc → returns IP of just postgres-0
+#
+# For our single-replica setup, both resolve to the same pod, but the
+# pattern is correct for when you scale to primary + replicas.
+#
+# REAL-WORLD: StatefulSets REQUIRE a headless Service. It's how K8s
+# assigns stable DNS names to individual pods.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None    # This makes it "headless"
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql

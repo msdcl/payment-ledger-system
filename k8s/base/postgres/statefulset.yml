@@ -1,0 +1,136 @@
+# =============================================================================
+# StatefulSet - For Stateful Applications Like Databases
+# =============================================================================
+#
+# WHY STATEFULSET INSTEAD OF DEPLOYMENT?
+# Databases need three things Deployments don't provide:
+#
+# 1. STABLE STORAGE: Each pod gets its own PersistentVolume that survives
+#    pod restarts. If postgres-0 crashes and restarts, it gets the SAME
+#    volume with all its data intact.
+#
+# 2. STABLE NETWORK IDENTITY: Pods get predictable names (postgres-0, postgres-1)
+#    and stable DNS entries. This is critical for replication - the replica
+#    needs to know the primary's address, and it can't change.
+#
+# 3. ORDERED STARTUP/SHUTDOWN: Pods start in order (0, 1, 2) and stop in
+#    reverse (2, 1, 0). The primary must be running before replicas start.
+#
+# REAL-WORLD CAVEAT:
+# Running databases in K8s is possible but complex. Many companies use
+# managed databases instead (AWS RDS, Cloud SQL) and only run stateless
+# apps in K8s. For learning, running PostgreSQL in K8s is excellent practice.
+#
+# Production options for databases in K8s:
+# - CloudNativePG (PostgreSQL operator)
+# - Patroni (PostgreSQL HA)
+# - CrunchyData PGO (PostgreSQL operator)
+# These operators handle replication, failover, backups automatically.
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  # serviceName must match the headless Service name (see service.yml)
+  # This is what gives pods their stable DNS names:
+  # postgres-0.postgres.payment-ledger.svc.cluster.local
+  serviceName: postgres
+  replicas: 1    # Single instance for dev. Production would use 2-3 with replication.
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/component: database
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: "payment_ledger"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_USERNAME
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_PASSWORD
+            # PGDATA tells PostgreSQL where to store data files.
+            # We point it to a subdirectory of the mounted volume.
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          # Liveness: Is PostgreSQL accepting connections?
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - payment_ledger
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          # Readiness: Same check - is it ready for queries?
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - payment_ledger
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+
+  # ---------------------------------------------------------------------------
+  # VOLUME CLAIM TEMPLATES
+  # ---------------------------------------------------------------------------
+  # This is unique to StatefulSets. Each pod gets its OWN PersistentVolumeClaim.
+  #
+  # When postgres-0 is created, K8s automatically creates a PVC named
+  # "postgres-data-postgres-0" and binds it to a PersistentVolume.
+  #
+  # If the pod is deleted and recreated, it reattaches to the SAME PVC.
+  # The data survives pod restarts, rescheduling, and even node failures
+  # (if the storage backend supports it, like cloud disks).
+  #
+  # DOCKER COMPOSE EQUIVALENT: Named volumes (postgres_data:/var/lib/postgresql/data)
+  # The difference: in K8s, PVCs are first-class resources with lifecycle management.
+  # ---------------------------------------------------------------------------
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]    # Only one pod can write at a time
+        resources:
+          requests:
+            storage: 1Gi                  # 1 GiB of disk space

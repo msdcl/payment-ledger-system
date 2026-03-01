@@ -1,0 +1,121 @@
+# =============================================================================
+# Ingress - External HTTP Access to the Application
+# =============================================================================
+#
+# WHAT: Ingress routes external HTTP(S) traffic to internal K8s Services.
+# Without Ingress, your services are only accessible inside the cluster
+# (ClusterIP) or via awkward NodePort numbers.
+#
+# HOW IT WORKS:
+#   Client → Ingress Controller (NGINX pod) → Service → Pods
+#
+# The Ingress Controller is a reverse proxy running inside K8s. It reads
+# Ingress resources and configures itself accordingly. When you create this
+# Ingress resource, NGINX automatically adds routing rules.
+#
+# REAL-WORLD INGRESS PATTERNS:
+# 1. Host-based routing (most common):
+#    api.example.com    → payment-service
+#    admin.example.com  → admin-service
+#
+# 2. Path-based routing:
+#    example.com/api/payments → payment-service
+#    example.com/api/users    → user-service
+#
+# 3. Both combined:
+#    api.example.com/v1/payments → payment-service-v1
+#    api.example.com/v2/payments → payment-service-v2
+#
+# TLS/HTTPS:
+# In production, the Ingress Controller terminates TLS. You provide a
+# certificate (often auto-provisioned by cert-manager from Let's Encrypt)
+# and the controller handles HTTPS. Traffic between the controller and
+# your pods is plain HTTP (inside the cluster, this is fine).
+#
+# CLOUD PROVIDERS:
+# On AWS, the Ingress Controller gets a LoadBalancer (ALB/NLB).
+# On GCP, GKE has its own Ingress implementation backed by Cloud Load Balancing.
+# Locally (Docker Desktop/minikube), we use NodePort.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: payment-ledger
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: payment-ledger
+    app.kubernetes.io/component: ingress
+  annotations:
+    # NOTE: We do NOT use rewrite-target here because our paths (/api, /actuator)
+    # should be forwarded as-is to the backend. rewrite-target: / would strip the
+    # path, turning /actuator/health into just / (breaking the app).
+    # Use rewrite-target when you need path prefix stripping, e.g.:
+    #   path: /payment-api(/|$)(.*)  +  rewrite-target: /$2
+    #   This would strip /payment-api prefix before forwarding.
+
+    # RATE LIMITING: Prevent abuse by limiting requests per second per IP.
+    # Without rate limiting, a single client could DDoS your service.
+    # 10 rps is generous for a payment API; adjust based on your traffic.
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+
+    # PROXY TIMEOUTS: How long NGINX waits for your app to respond.
+    # Payment processing might take longer than typical web requests.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+
+    # CORS (Cross-Origin Resource Sharing):
+    # If your API is called from a browser on a different domain,
+    # you need CORS headers. Uncomment if needed:
+    # nginx.ingress.kubernetes.io/enable-cors: "true"
+    # nginx.ingress.kubernetes.io/cors-allow-origin: "https://app.example.com"
+spec:
+  # Which Ingress Controller class to use
+  ingressClassName: nginx
+
+  rules:
+    # -----------------------------------------------------------------------
+    # HOST-BASED ROUTING
+    # -----------------------------------------------------------------------
+    # "payment-ledger.local" is a local hostname. To use it:
+    # Add to /etc/hosts: 127.0.0.1 payment-ledger.local
+    #
+    # In production, this would be your real domain (api.example.com)
+    # with DNS pointing to the Ingress Controller's load balancer IP.
+    # -----------------------------------------------------------------------
+    - host: payment-ledger.local
+      http:
+        paths:
+          # Route /api/* to the payment-ledger service
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: payment-ledger
+                port:
+                  number: 8050
+
+          # Route /actuator/* for health checks and metrics
+          # In production, you might restrict this to internal traffic only
+          - path: /actuator
+            pathType: Prefix
+            backend:
+              service:
+                name: payment-ledger
+                port:
+                  number: 8050
+
+  # -----------------------------------------------------------------------
+  # TLS CONFIGURATION (commented out for local dev)
+  # -----------------------------------------------------------------------
+  # In production, enable TLS with a certificate.
+  # cert-manager can auto-provision certificates from Let's Encrypt:
+  #   1. Install cert-manager: helm install cert-manager jetstack/cert-manager
+  #   2. Create a ClusterIssuer for Let's Encrypt
+  #   3. Add annotation: cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  #   4. Uncomment the tls section below
+  #
+  # tls:
+  #   - hosts:
+  #       - payment-ledger.example.com
+  #     secretName: payment-ledger-tls
+  # -----------------------------------------------------------------------

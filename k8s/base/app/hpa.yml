@@ -1,0 +1,120 @@
+# =============================================================================
+# Horizontal Pod Autoscaler (HPA) - Automatic Scaling
+# =============================================================================
+#
+# WHAT: HPA watches your pods' resource usage and automatically adjusts
+# the replica count to meet demand. Think of it as cruise control for
+# your application - you set the desired speed (target CPU), and HPA
+# adjusts the throttle (replicas) to maintain it.
+#
+# HOW THE MATH WORKS:
+# desiredReplicas = ceil(currentReplicas * (currentMetric / targetMetric))
+#
+# Example: 2 replicas at 80% CPU, target is 50%:
+#   desiredReplicas = ceil(2 * (80/50)) = ceil(3.2) = 4
+# K8s would scale to 4 replicas to bring CPU down to ~40% per pod.
+#
+# SCALING BEHAVIOR:
+# - Scale UP: Fast (minutes) - when users are waiting, you want pods NOW
+# - Scale DOWN: Slow (default 5 minutes) - prevents "flapping" where pods
+#   keep scaling up/down rapidly due to brief traffic fluctuations
+#
+# PREREQUISITES:
+# 1. Metrics Server must be installed (provides CPU/memory data to HPA)
+# 2. Pods MUST have resource requests defined (HPA uses requests as the
+#    100% baseline). Without requests, HPA can't calculate percentages.
+#
+# REAL-WORLD HPA STRATEGIES:
+# 1. CPU-based (what we do): Simple, works for most stateless apps
+# 2. Memory-based: Useful for apps with memory leaks or caching
+# 3. Custom metrics: Scale on business metrics like queue depth or
+#    requests per second (requires Prometheus Adapter)
+# 4. Multiple metrics: HPA picks the highest desired replica count
+#
+# IMPORTANT CAVEAT:
+# HPA and manual replica counts (in Deployment spec) conflict.
+# When HPA is active, it OVERRIDES the Deployment's replica count.
+# Don't set replicas in the Deployment if HPA manages it.
+# Our Kustomize overlays set replicas, so in production you'd remove
+# the replica patch from the overlay and let HPA manage it instead.
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment-ledger
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: payment-ledger
+    app.kubernetes.io/component: autoscaler
+spec:
+  # Which Deployment to scale
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payment-ledger
+
+  # Scaling bounds - prevent runaway scaling
+  minReplicas: 1    # Never go below 1 (or 2 in prod for HA)
+  maxReplicas: 5    # Cap at 5 to prevent resource exhaustion
+
+  # -------------------------------------------------------------------------
+  # METRICS: What to measure for scaling decisions
+  # -------------------------------------------------------------------------
+  metrics:
+    # CPU utilization - the most common scaling metric
+    # "averageUtilization: 70" means: scale up when the AVERAGE CPU usage
+    # across all pods exceeds 70% of their CPU REQUEST.
+    #
+    # WHY 70% AND NOT 80-90%?
+    # You need headroom for traffic spikes. If you scale at 90%, by the time
+    # new pods start (30-60s), existing pods might be at 100% and dropping requests.
+    # 70% gives a buffer while new pods come up.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+    # Memory utilization - secondary metric
+    # Memory-based scaling is less common because:
+    # - JVM apps have relatively stable memory (heap is pre-allocated)
+    # - Memory doesn't fluctuate with traffic the way CPU does
+    # But it's useful as a safety net against memory leaks.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+  # -------------------------------------------------------------------------
+  # SCALING BEHAVIOR: Control how fast scaling happens
+  # -------------------------------------------------------------------------
+  # These policies prevent "flapping" (rapid scale up/down cycles) and
+  # ensure smooth scaling. This is a v2 feature (v1 didn't have this).
+  # -------------------------------------------------------------------------
+  behavior:
+    scaleUp:
+      # Stabilization window: after a scale-up, wait this long before
+      # considering another scale-up. Prevents cascading scale events.
+      stabilizationWindowSeconds: 60
+      policies:
+        # Scale up by at most 2 pods at a time
+        # WHY? Sudden scale-up of 10 pods could overload your database
+        # with connection storms. Gradual scaling is safer.
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+
+    scaleDown:
+      # Longer stabilization for scale-down (5 minutes)
+      # WHY LONGER? Scaling down too aggressively means you'll just scale
+      # back up again when the next traffic wave hits. Better to wait
+      # and confirm the traffic is truly gone.
+      stabilizationWindowSeconds: 300
+      policies:
+        # Scale down by at most 1 pod at a time
+        - type: Pods
+          value: 1
+          periodSeconds: 120

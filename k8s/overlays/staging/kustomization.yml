@@ -1,0 +1,66 @@
+# =============================================================================
+# Staging Overlay - Pre-Production Environment
+# =============================================================================
+#
+# WHY STAGING?
+# Staging mirrors production as closely as possible. It's the last gate
+# before code reaches real users. The goal:
+# - Same replica count as prod (or close)
+# - Same resource limits
+# - Same config (but pointing to staging databases)
+# - Same monitoring and alerting
+#
+# REAL-WORLD STAGING PATTERNS:
+# - Some companies have staging receive a copy of production traffic ("shadow traffic")
+# - Others run automated E2E tests against staging after every deploy
+# - Staging is where you catch config issues that dev environments miss
+#   (e.g., "works in dev with 1 replica, breaks with 2 due to a race condition")
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+namespace: payment-ledger
+
+labels:
+  - pairs:
+      environment: staging
+
+patches:
+  # 2 replicas for staging - matches production topology
+  - target:
+      kind: Deployment
+      name: payment-ledger
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: payment-ledger
+      spec:
+        replicas: 2
+        template:
+          spec:
+            containers:
+              - name: payment-ledger
+                resources:
+                  requests:
+                    cpu: "250m"
+                    memory: "512Mi"
+                  limits:
+                    cpu: "1000m"
+                    memory: "768Mi"
+
+  # Override ConfigMap for staging logging and JVM settings
+  - target:
+      kind: ConfigMap
+      name: payment-ledger-config
+    patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: payment-ledger-config
+      data:
+        LOGGING_LEVEL_COM_FLAGSHIP: "INFO"
+        JAVA_OPTS: "-Xms256m -Xmx512m"

@@ -1,0 +1,95 @@
+# =============================================================================
+# Production Overlay - Live Traffic Environment
+# =============================================================================
+#
+# PRODUCTION HARDENING:
+# This overlay applies production-grade settings:
+# - 3 replicas (survives a node failure with 2 still running)
+# - Generous resource limits (no throttling under load)
+# - WARN logging (reduce noise, save log storage costs)
+# - Pod disruption budget (prevents K8s from killing too many pods at once)
+#
+# REAL-WORLD PRODUCTION CONCERNS:
+# 1. Pod Disruption Budget (PDB): During cluster upgrades, K8s drains nodes
+#    (moves pods elsewhere). Without a PDB, K8s might drain all your pods at
+#    once → downtime. PDB says "always keep at least N pods running."
+#
+# 2. Pod Anti-Affinity: Spread replicas across different nodes. If all 3
+#    replicas are on the same node and that node dies → total outage.
+#    Anti-affinity says "don't schedule two replicas on the same node."
+#
+# 3. Topology Spread: Similar to anti-affinity but works across availability
+#    zones (AWS us-east-1a, us-east-1b, etc.)
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+namespace: payment-ledger
+
+labels:
+  - pairs:
+      environment: prod
+
+patches:
+  # 3 replicas with production resource limits
+  - target:
+      kind: Deployment
+      name: payment-ledger
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: payment-ledger
+      spec:
+        replicas: 3
+        template:
+          spec:
+            containers:
+              - name: payment-ledger
+                resources:
+                  requests:
+                    cpu: "500m"
+                    memory: "768Mi"
+                  limits:
+                    cpu: "2000m"
+                    memory: "1536Mi"
+
+  # -----------------------------------------------------------------------
+  # Production PostgreSQL: More resources
+  # -----------------------------------------------------------------------
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: postgres
+      spec:
+        template:
+          spec:
+            containers:
+              - name: postgres
+                resources:
+                  requests:
+                    cpu: "500m"
+                    memory: "512Mi"
+                  limits:
+                    cpu: "1000m"
+                    memory: "1Gi"
+
+  # Override ConfigMap for production logging and JVM settings
+  - target:
+      kind: ConfigMap
+      name: payment-ledger-config
+    patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: payment-ledger-config
+      data:
+        LOGGING_LEVEL_COM_FLAGSHIP: "WARN"
+        JAVA_OPTS: "-Xms512m -Xmx1024m -XX:MaxRAMPercentage=75"

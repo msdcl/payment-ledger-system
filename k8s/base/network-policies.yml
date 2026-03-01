@@ -1,0 +1,188 @@
+# =============================================================================
+# NetworkPolicy - Pod-to-Pod Firewall Rules
+# =============================================================================
+#
+# WHAT: NetworkPolicies are K8s-native firewall rules that control traffic
+# between pods. Without them, every pod can talk to every other pod -
+# which is a security risk in multi-tenant or production environments.
+#
+# HOW IT WORKS:
+# - Once you create ANY NetworkPolicy that selects a pod, that pod becomes
+#   "isolated" - only traffic explicitly allowed by policies gets through.
+# - Pods without any NetworkPolicy selecting them are unaffected (allow all).
+# - NetworkPolicies are additive: if multiple policies select a pod, the
+#   UNION of all allowed traffic is permitted.
+#
+# REQUIRES: A CNI (Container Network Interface) plugin that supports
+# NetworkPolicy. Calico, Cilium, and Weave support it. The default
+# Docker Desktop CNI (kindnet) has LIMITED support.
+#
+# REAL-WORLD:
+# - PCI DSS compliance requires network segmentation for payment systems
+# - Many companies start with "allow all" and gradually restrict
+# - The hardest part isn't writing policies - it's discovering all the
+#   traffic flows your app needs (this is why you add policies gradually)
+#
+# PRINCIPLE: Default deny, explicit allow.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# DEFAULT DENY ALL INGRESS
+# ---------------------------------------------------------------------------
+# This policy selects ALL pods in the namespace (empty podSelector = all)
+# and denies ALL incoming traffic by not specifying any ingress rules.
+#
+# After applying this, pods can only receive traffic from explicitly
+# allowed sources. This is the foundation of a secure network.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/component: network-security
+spec:
+  podSelector: {}        # Selects ALL pods in the namespace
+  policyTypes:
+    - Ingress            # Only restricts incoming traffic
+  # No ingress rules = deny all incoming
+
+---
+# ---------------------------------------------------------------------------
+# ALLOW: Ingress Controller → payment-ledger app
+# ---------------------------------------------------------------------------
+# The Ingress Controller (in ingress-nginx namespace) needs to forward
+# HTTP requests to our app pods. Without this rule, the Ingress would
+# get connection refused.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-app
+  namespace: payment-ledger
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: payment-ledger
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from Ingress Controller namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8050
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# ALLOW: payment-ledger app → PostgreSQL
+# ---------------------------------------------------------------------------
+# The app needs to connect to PostgreSQL on port 5432.
+# No other pods should be able to reach PostgreSQL.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-to-postgres
+  namespace: payment-ledger
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/component: database
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: payment-ledger
+              app.kubernetes.io/component: api
+      ports:
+        - port: 5432
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# ALLOW: payment-ledger app → Redis
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-to-redis
+  namespace: payment-ledger
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+      app.kubernetes.io/component: cache
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: payment-ledger
+              app.kubernetes.io/component: api
+      ports:
+        - port: 6379
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# ALLOW: payment-ledger app → Kafka
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-to-kafka
+  namespace: payment-ledger
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+      app.kubernetes.io/component: messaging
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: payment-ledger
+              app.kubernetes.io/component: api
+      ports:
+        - port: 9092
+          protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# ALLOW: Prometheus → payment-ledger app (metrics scraping)
+# ---------------------------------------------------------------------------
+# Prometheus needs to scrape /actuator/prometheus on port 8050.
+# Without this, Prometheus can't collect metrics from the app.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-to-app
+  namespace: payment-ledger
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: payment-ledger
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8050
+          protocol: TCP

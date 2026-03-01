@@ -1,0 +1,307 @@
+# =============================================================================
+# Deployment - Manages Your Application Pods
+# =============================================================================
+#
+# WHAT: A Deployment is the most common K8s resource for running stateless
+# applications. It ensures the desired number of pod replicas are always
+# running and handles rolling updates.
+#
+# WHY NOT JUST CREATE PODS DIRECTLY?
+# If you create a bare Pod, K8s won't restart it when it crashes.
+# A Deployment creates a ReplicaSet, which manages the pods:
+#
+#   Deployment → creates → ReplicaSet → creates → Pod(s)
+#
+# The chain of ownership means:
+# - Deployment handles versioning and rollback
+# - ReplicaSet ensures the right number of pods are running
+# - Pods actually run your containers
+#
+# REAL-WORLD:
+# Every web service, API, and microservice runs as a Deployment.
+# The only exceptions are databases (use StatefulSet) and batch jobs (use Job).
+#
+# DOCKER COMPOSE EQUIVALENT:
+# This is like the `app:` service in your docker-compose.yml, but with:
+# - Multiple replicas
+# - Self-healing (auto-restart)
+# - Rolling updates
+# - Resource limits
+# - Health probes
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-ledger
+  namespace: payment-ledger
+  # Labels on the Deployment itself (for organizing and selecting Deployments)
+  labels:
+    app.kubernetes.io/name: payment-ledger
+    app.kubernetes.io/component: api
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  # ---------------------------------------------------------------------------
+  # REPLICAS
+  # ---------------------------------------------------------------------------
+  # How many identical pods to run. K8s ensures this exact count:
+  # - If a pod crashes → K8s creates a new one
+  # - If there are too many → K8s terminates extras
+  #
+  # For dev: 1-2 replicas. For production: 3+ (across multiple nodes).
+  # With 2 replicas, one can restart during deployment while the other serves traffic.
+  # ---------------------------------------------------------------------------
+  replicas: 2
+
+  # ---------------------------------------------------------------------------
+  # SELECTOR
+  # ---------------------------------------------------------------------------
+  # Tells the Deployment which pods it "owns." The selector MUST match the
+  # pod template's labels below. This is how K8s knows which pods belong to
+  # this Deployment vs other Deployments.
+  #
+  # IMPORTANT: selector.matchLabels is immutable after creation. Choose labels
+  # carefully - you can't change them later without deleting the Deployment.
+  # ---------------------------------------------------------------------------
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payment-ledger
+      app.kubernetes.io/component: api
+
+  # ---------------------------------------------------------------------------
+  # UPDATE STRATEGY
+  # ---------------------------------------------------------------------------
+  # Controls HOW rolling updates happen:
+  #
+  # RollingUpdate (default):
+  #   - maxUnavailable: 0 → Never have fewer pods than desired (always 2 running)
+  #   - maxSurge: 1 → Create 1 extra pod during update (temporarily 3 pods)
+  #   This means: New pod starts → passes health check → old pod terminates
+  #   Result: ZERO DOWNTIME deployment
+  #
+  # Recreate (alternative):
+  #   - Kills ALL old pods, then creates new ones
+  #   - Has downtime, but simpler
+  #   - Used when old and new versions can't run simultaneously (DB schema changes)
+  #
+  # REAL-WORLD: RollingUpdate is the default for 95% of services.
+  # Canary deployments (send 10% of traffic to new version) need service mesh.
+  # ---------------------------------------------------------------------------
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0    # Never reduce below desired count during update
+      maxSurge: 1          # Allow 1 extra pod during update
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payment-ledger
+        app.kubernetes.io/component: api
+    spec:
+      # -----------------------------------------------------------------------
+      # POD SECURITY CONTEXT
+      # -----------------------------------------------------------------------
+      # These settings apply to ALL containers in the pod. They enforce
+      # security best practices that prevent container escapes and privilege
+      # escalation.
+      #
+      # WHY THIS MATTERS:
+      # By default, containers run as root. If an attacker exploits a
+      # vulnerability in your app, they get root in the container. Combined
+      # with a kernel exploit, they could escape to the host. Running as
+      # non-root with read-only filesystem drastically reduces this risk.
+      #
+      # REAL-WORLD: Pod Security Standards (PSS) in K8s define three levels:
+      # - Privileged: No restrictions (for system pods like CNI, CSI drivers)
+      # - Baseline: Prevents known privilege escalations
+      # - Restricted: Maximally restricted (what we implement below)
+      # Many companies enforce "Restricted" in production namespaces.
+      # -----------------------------------------------------------------------
+      securityContext:
+        # Run all containers as non-root user (UID 1000)
+        # Our Dockerfile already creates user "appuser" with UID 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        # Set the filesystem group - files created will be owned by this GID
+        fsGroup: 1000
+
+      # -----------------------------------------------------------------------
+      # CONTAINER SPEC
+      # -----------------------------------------------------------------------
+      containers:
+        - name: payment-ledger
+          # For local Docker Desktop K8s, use the local image name.
+          # In production, this would be: ghcr.io/msdcl/payment-ledger-system:sha-abc1234
+          image: payment-ledger-app:latest
+          # imagePullPolicy: Never → Use the locally built image (don't try to pull from registry)
+          # In production, use "IfNotPresent" or "Always"
+          imagePullPolicy: Never
+
+          # Container-level security context (overrides pod-level for this container)
+          securityContext:
+            # Prevent privilege escalation (e.g., via setuid binaries)
+            allowPrivilegeEscalation: false
+            # Drop ALL Linux capabilities, add back only what's needed
+            # Capabilities are fine-grained root privileges. CAP_NET_BIND can
+            # bind to port <1024, CAP_SYS_ADMIN can mount filesystems, etc.
+            # Dropping all and adding none = minimal attack surface.
+            capabilities:
+              drop:
+                - ALL
+            # Read-only root filesystem
+            # Prevents attackers from writing malicious files, scripts, or
+            # modifying application binaries. The app writes to /tmp only.
+            readOnlyRootFilesystem: true
+
+          ports:
+            - name: http
+              containerPort: 8050    # Must match your Spring Boot server.port
+              protocol: TCP
+
+          # -------------------------------------------------------------------
+          # ENVIRONMENT VARIABLES
+          # -------------------------------------------------------------------
+          # Three sources of env vars:
+          # 1. `envFrom` → Load ALL keys from a ConfigMap/Secret as env vars
+          # 2. `env[].valueFrom.configMapKeyRef` → Load specific keys
+          # 3. `env[].value` → Hardcoded value (avoid for config)
+          #
+          # We use `envFrom` to load the entire ConfigMap, then `env` for
+          # secrets (because secrets need specific references).
+          # -------------------------------------------------------------------
+          envFrom:
+            - configMapRef:
+                name: payment-ledger-config
+          env:
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_USERNAME
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_PASSWORD
+
+          # Volume mount for writable /tmp (needed with readOnlyRootFilesystem)
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+
+          # -------------------------------------------------------------------
+          # RESOURCE REQUESTS & LIMITS
+          # -------------------------------------------------------------------
+          # CRITICAL CONCEPT for production K8s:
+          #
+          # Requests: "Minimum guaranteed resources" - used by the Scheduler to
+          #   decide which node has enough capacity for this pod.
+          #   If a node has 4GB RAM and 3GB is requested by existing pods,
+          #   a pod requesting 2GB won't be scheduled there.
+          #
+          # Limits: "Maximum allowed" - the container is killed (OOMKilled) or
+          #   throttled (CPU) if it exceeds this.
+          #
+          # BEST PRACTICE: Always set both. Without limits, a single runaway
+          # pod can consume all node resources and crash OTHER pods.
+          #
+          # SIZING GUIDE (for a Spring Boot app):
+          # - CPU: Start with 250m request / 1000m limit
+          #   (1000m = 1 full CPU core; m = millicores)
+          # - Memory: Start with 512Mi request / 768Mi limit
+          #   (Mi = mebibytes, like MB but binary)
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: "250m"        # 0.25 CPU cores guaranteed
+              memory: "512Mi"    # 512MB RAM guaranteed
+            limits:
+              cpu: "1000m"       # Max 1 full CPU core
+              memory: "768Mi"    # Max 768MB RAM (OOMKilled if exceeded)
+
+          # -------------------------------------------------------------------
+          # LIVENESS PROBE
+          # -------------------------------------------------------------------
+          # "Is this container alive or should I restart it?"
+          #
+          # K8s periodically hits this endpoint. If it fails `failureThreshold`
+          # times in a row, K8s RESTARTS the container (kills + recreates).
+          #
+          # USE CASE: Detects deadlocks, infinite loops, or corrupted state
+          # where the process is running but not functional.
+          #
+          # Your Spring Boot Actuator /actuator/health endpoint is perfect for this.
+          # It checks DB connectivity, Redis, Kafka - if any are broken, health
+          # returns non-200, and K8s restarts the pod.
+          #
+          # initialDelaySeconds: Wait 60s before first check (Spring Boot needs
+          # time to start up - JVM warmup, DB migration, etc.)
+          #
+          # DOCKER COMPOSE EQUIVALENT: The HEALTHCHECK in your Dockerfile
+          # -------------------------------------------------------------------
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            initialDelaySeconds: 60      # Wait for Spring Boot to start
+            periodSeconds: 15            # Check every 15 seconds
+            timeoutSeconds: 5            # Timeout each check after 5 seconds
+            failureThreshold: 3          # Restart after 3 consecutive failures
+
+          # -------------------------------------------------------------------
+          # READINESS PROBE
+          # -------------------------------------------------------------------
+          # "Is this container ready to receive traffic?"
+          #
+          # This is DIFFERENT from liveness:
+          # - Liveness failure → RESTART the container
+          # - Readiness failure → STOP SENDING TRAFFIC (but don't restart)
+          #
+          # WHY BOTH?
+          # During startup, your app is alive but not ready (still connecting
+          # to DB, loading caches). You don't want traffic yet, but you also
+          # don't want K8s to restart it.
+          #
+          # During a rolling update:
+          # 1. New pod starts → readiness probe fails (still starting)
+          # 2. Old pod keeps serving traffic
+          # 3. New pod becomes ready → readiness probe passes
+          # 4. Traffic shifts to new pod
+          # 5. Old pod terminates
+          # This is HOW zero-downtime deployments work.
+          #
+          # REAL-WORLD: Readiness probes are arguably MORE important than
+          # liveness probes. Without them, K8s sends traffic to pods that
+          # aren't ready → users see errors during deployments.
+          # -------------------------------------------------------------------
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            initialDelaySeconds: 30      # Shorter than liveness - check sooner
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      # -----------------------------------------------------------------------
+      # VOLUMES
+      # -----------------------------------------------------------------------
+      # The JVM and Spring Boot need writable /tmp for:
+      # - JVM temporary files (class data, NIO buffers)
+      # - Spring Boot embedded Tomcat work directory
+      # Since we made the root filesystem read-only, we mount an emptyDir
+      # as /tmp. emptyDir is backed by RAM (tmpfs) or node disk.
+      # -----------------------------------------------------------------------
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+      # -----------------------------------------------------------------------
+      # RESTART POLICY
+      # -----------------------------------------------------------------------
+      # Always restart containers when they exit (regardless of exit code).
+      # This is the default for Deployments and almost never changed.
+      # For Jobs (batch work), you'd use "OnFailure" or "Never".
+      # -----------------------------------------------------------------------
+      restartPolicy: Always

@@ -1,0 +1,199 @@
+# =============================================================================
+# PrometheusRule - Alerting Rules for Payment Ledger
+# =============================================================================
+#
+# WHAT: PrometheusRule is a CRD that defines alerting (and recording) rules.
+# The Prometheus Operator watches for these and injects them into Prometheus.
+#
+# ALERT DESIGN PRINCIPLES:
+# 1. Alert on SYMPTOMS, not causes.
+#    - Bad:  "CPU > 80%" (cause) → Maybe the app handles it fine
+#    - Good: "p99 latency > 2s" (symptom) → Users are actually affected
+#
+# 2. Every alert should be ACTIONABLE.
+#    - Bad:  "Redis memory increasing" → What should I do about it?
+#    - Good: "Redis memory > 90% of limit" → Scale Redis or flush cache
+#
+# 3. Set severity levels realistically:
+#    - critical: pages someone at 3 AM, means data loss or service down
+#    - warning: can wait until business hours
+#    - info: nice to know, shows in dashboards
+#
+# REAL-WORLD ALERT FATIGUE:
+# The #1 problem with alerting is too many alerts. If your team gets 50
+# alerts/day, people start ignoring them. Google's SRE book recommends
+# each alert should require human action. If you can write a script to
+# handle it, automate it instead of alerting.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: payment-ledger-alerts
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: payment-ledger
+    # The Prometheus Operator discovers rules by labels.
+    # Our Helm values set ruleSelectorNilUsesHelmValues: false,
+    # which means Prometheus watches ALL PrometheusRules regardless of labels.
+    release: prometheus-stack
+spec:
+  groups:
+    # =========================================================================
+    # Group 1: Payment Business Alerts
+    # These alert on business-level symptoms that affect users
+    # =========================================================================
+    - name: payment-ledger.business
+      rules:
+        # -------------------------------------------------------------------
+        # HIGH ERROR RATE
+        # If more than 5% of payments are failing, something is wrong.
+        # This uses the "error budget" approach from SRE practices.
+        # -------------------------------------------------------------------
+        - alert: PaymentHighErrorRate
+          expr: |
+            (
+              rate(payment_failed_total{job="payment-ledger"}[5m])
+              /
+              rate(payment_total{job="payment-ledger"}[5m])
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+            team: payments
+          annotations:
+            summary: "High payment failure rate (> 5%)"
+            description: "{{ $value | humanizePercentage }} of payments are failing over the last 5 minutes."
+            runbook_url: "https://wiki.example.com/runbooks/payment-high-error-rate"
+            # REAL-WORLD: runbook_url is critical in production.
+            # When you get paged at 3 AM, the runbook tells you step-by-step
+            # what to check and how to mitigate. Without it, you're debugging
+            # from scratch under pressure.
+
+        # -------------------------------------------------------------------
+        # HIGH API LATENCY
+        # p99 > 2 seconds means the slowest 1% of requests are unacceptable.
+        # Users notice latency above ~200ms, but we alert at 2s to avoid noise.
+        # -------------------------------------------------------------------
+        - alert: PaymentAPIHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              rate(payment_api_duration_seconds_bucket{job="payment-ledger"}[5m])
+            ) > 2
+          for: 5m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "Payment API p99 latency > 2s"
+            description: "p99 latency is {{ $value | humanizeDuration }}. Check database queries and downstream services."
+
+    # =========================================================================
+    # Group 2: Outbox Pattern Alerts
+    # The outbox is critical for event delivery. A growing backlog means
+    # events aren't reaching Kafka, which could mean lost data.
+    # =========================================================================
+    - name: payment-ledger.outbox
+      rules:
+        # -------------------------------------------------------------------
+        # OUTBOX BACKLOG GROWING
+        # If the backlog is > 100 events for 10 minutes, the publisher is stuck.
+        # This could mean Kafka is down or the publisher thread crashed.
+        # -------------------------------------------------------------------
+        - alert: OutboxBacklogGrowing
+          expr: outbox_backlog_size{job="payment-ledger"} > 100
+          for: 10m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "Outbox backlog is growing ({{ $value }} events)"
+            description: "The outbox has {{ $value }} unpublished events. Check Kafka connectivity and the outbox publisher thread."
+
+        # -------------------------------------------------------------------
+        # OUTBOX CRITICAL BACKLOG
+        # At 1000+ events, we're at risk of the outbox table growing unbounded.
+        # This is a critical alert - potential data delivery failure.
+        # -------------------------------------------------------------------
+        - alert: OutboxBacklogCritical
+          expr: outbox_backlog_size{job="payment-ledger"} > 1000
+          for: 5m
+          labels:
+            severity: critical
+            team: payments
+          annotations:
+            summary: "CRITICAL: Outbox backlog at {{ $value }} events"
+            description: "Outbox is severely backed up. Events are not reaching Kafka. Immediate investigation needed."
+
+        # -------------------------------------------------------------------
+        # OUTBOX EVENTS FAILING
+        # Any failed events need attention - they'll need manual replay.
+        # -------------------------------------------------------------------
+        - alert: OutboxEventsFailing
+          expr: rate(outbox_events_failed{job="payment-ledger"}[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "Outbox events are failing to publish"
+            description: "Events are failing to publish to Kafka. Check Kafka broker health and network connectivity."
+
+    # =========================================================================
+    # Group 3: Infrastructure Alerts
+    # JVM, database connections, and pod health
+    # =========================================================================
+    - name: payment-ledger.infrastructure
+      rules:
+        # -------------------------------------------------------------------
+        # POD RESTARTS
+        # Frequent restarts usually mean OOM kills or crash loops.
+        # OOM kills: JVM is using more memory than the container limit.
+        # Crash loops: app fails to start (bad config, DB unreachable, etc.)
+        # -------------------------------------------------------------------
+        - alert: PodFrequentRestarts
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              namespace="payment-ledger",
+              container="payment-ledger"
+            }[1h]) > 3
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Payment-ledger pod restarting frequently"
+            description: "Pod {{ $labels.pod }} has restarted {{ $value }} times in the last hour."
+
+        # -------------------------------------------------------------------
+        # DATABASE CONNECTION POOL EXHAUSTION
+        # If pending connections > 0, threads are waiting for DB connections.
+        # This causes latency spikes and potential timeouts.
+        # -------------------------------------------------------------------
+        - alert: HikariConnectionPoolExhaustion
+          expr: hikaricp_connections_pending{job="payment-ledger"} > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "DB connection pool has pending requests"
+            description: "{{ $value }} threads are waiting for a database connection. Consider increasing pool size or optimizing queries."
+
+        # -------------------------------------------------------------------
+        # JVM HEAP MEMORY HIGH
+        # If heap usage consistently > 85% of max, GC pressure increases
+        # dramatically and you're at risk of OOM.
+        # -------------------------------------------------------------------
+        - alert: JVMHeapMemoryHigh
+          expr: |
+            sum(jvm_memory_used_bytes{job="payment-ledger", area="heap"})
+            /
+            sum(jvm_memory_max_bytes{job="payment-ledger", area="heap"})
+            > 0.85
+          for: 10m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "JVM heap memory usage > 85%"
+            description: "Heap usage is at {{ $value | humanizePercentage }}. Consider increasing -Xmx or investigating memory leaks."

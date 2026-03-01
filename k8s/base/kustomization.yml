@@ -1,0 +1,50 @@
+# =============================================================================
+# Kustomization - Base Configuration
+# =============================================================================
+#
+# WHAT: This file tells Kustomize which resources make up your application.
+# Running `kubectl apply -k k8s/base/` applies all listed resources.
+#
+# HOW KUSTOMIZE WORKS:
+# 1. Reads this kustomization.yml
+# 2. Loads all listed resources
+# 3. Applies any patches, labels, or transformations
+# 4. Outputs the final YAML (or applies it to the cluster)
+#
+# The base is your "default" configuration. Overlays (dev/staging/prod)
+# inherit everything from base and only change what's different.
+#
+# PREVIEW WHAT KUSTOMIZE GENERATES (without applying):
+#   kubectl kustomize k8s/base/
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Common labels added to ALL resources managed by this kustomization.
+# These labels help identify which resources belong to this app.
+# Note: 'labels' replaces the deprecated 'commonLabels'. The key difference:
+# - commonLabels: adds labels to BOTH metadata AND selectors (dangerous to change later!)
+# - labels: adds to metadata only by default, with includeSelectors option
+# includeSelectors defaults to false - labels only go on metadata.
+# This is the safe default. Adding labels to selectors after initial
+# deployment would fail because K8s makes selectors immutable.
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+
+# All the resource files that make up the payment-ledger application.
+# Kustomize reads these and combines them into a single output.
+resources:
+  - namespace.yml
+  - app/configmap.yml
+  - app/secret.yml
+  - app/deployment.yml
+  - app/service.yml
+  - postgres/statefulset.yml
+  - postgres/service.yml
+  - redis/deployment.yml
+  - kafka/statefulset.yml
+  - app/servicemonitor.yml
+  - app/ingress.yml
+  - app/hpa.yml
+  - network-policies.yml

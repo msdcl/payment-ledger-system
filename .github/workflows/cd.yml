@@ -1,0 +1,413 @@
+# =============================================================================
+# CD Pipeline - Continuous Deployment to Kubernetes
+# =============================================================================
+#
+# WHAT THIS DOES:
+# After CI passes and a Docker image is built, this workflow deploys the
+# application through environments: dev → staging → prod.
+#
+# THE DEPLOYMENT PIPELINE:
+#   Push to master → CI tests → Docker build → Dev (auto) → Staging (manual) → Prod (manual)
+#
+# KEY CONCEPTS:
+#
+# 1. GITHUB ENVIRONMENTS:
+#    Environments are a GitHub feature that provides:
+#    - Approval gates (require specific people to approve before deploying)
+#    - Environment-specific secrets (different DB passwords per environment)
+#    - Deployment history (see what's deployed where in GitHub's UI)
+#    - Protection rules (e.g., "only master branch can deploy to prod")
+#    Go to Settings → Environments in your repo to configure these.
+#
+# 2. WORKFLOW_RUN TRIGGER:
+#    This workflow runs AFTER another workflow completes. It's how we chain:
+#    Docker Build → CD. This is better than putting deployment in the Docker
+#    workflow because:
+#    - Separation of concerns (build vs deploy)
+#    - You can re-run just the deployment without rebuilding
+#    - Different permissions (deploy needs K8s access, build needs registry access)
+#
+# 3. KUSTOMIZE FOR DEPLOYMENT:
+#    We use `kubectl apply -k` with our Kustomize overlays. This means the
+#    same manifests we've been developing locally are what gets deployed in CI.
+#    No drift between what you test and what runs in production.
+#
+# REAL-WORLD CD PATTERNS:
+# - "Push-based" (what we do): CI pipeline pushes changes to the cluster
+# - "Pull-based" (GitOps): A tool IN the cluster (ArgoCD, Flux) watches Git
+#   and pulls changes. Pull-based is considered more secure because the
+#   cluster credentials never leave the cluster.
+#
+# Most companies start with push-based (simpler) and migrate to pull-based
+# (ArgoCD/Flux) as they scale. Both are valid approaches.
+# =============================================================================
+
+name: CD Pipeline
+
+on:
+  # Trigger after Docker workflow completes successfully
+  workflow_run:
+    workflows: ["Docker Build & Push"]
+    types:
+      - completed
+    branches: [master, main]
+
+  # Manual trigger - useful for re-deploying without a new build
+  # You can select the environment and image tag from the GitHub UI
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      image_tag:
+        description: 'Docker image tag to deploy (default: latest)'
+        required: false
+        default: 'latest'
+
+# ---------------------------------------------------------------------------
+# ENVIRONMENT VARIABLES
+# ---------------------------------------------------------------------------
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # =========================================================================
+  # JOB 1: DEPLOY TO DEV (Automatic)
+  # =========================================================================
+  # Dev deployment is fully automatic - no approval needed.
+  # Every successful build deploys to dev immediately.
+  #
+  # WHY AUTO-DEPLOY TO DEV?
+  # Dev is for the team to test the latest code. It should always reflect
+  # the latest master. If something breaks in dev, it's caught before
+  # staging. The blast radius is small (only the dev team is affected).
+  # =========================================================================
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    # Only run if the triggering workflow succeeded (or manual dispatch)
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+
+    # GitHub Environment - enables deployment tracking in the repo's UI
+    # Go to your repo → Settings → Environments → New environment → "dev"
+    environment:
+      name: dev
+      # URL shows in the GitHub UI as a link to the deployed environment
+      url: https://dev.payment-ledger.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # SET UP KUBECTL
+      # -----------------------------------------------------------------------
+      # In a real cluster, you'd configure kubectl with a kubeconfig from
+      # a GitHub Secret. For cloud clusters:
+      # - AWS EKS: use aws-actions/configure-aws-credentials + aws eks update-kubeconfig
+      # - GKE: use google-github-actions/auth + google-github-actions/get-gke-credentials
+      # - Azure AKS: use azure/aks-set-context
+      #
+      # The kubeconfig contains the cluster's API server address and
+      # authentication credentials. It's the key to your kingdom -
+      # NEVER commit it to Git.
+      # -----------------------------------------------------------------------
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.31.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+        # SECURITY: kubeconfig is stored as a base64-encoded GitHub Secret.
+        # To create the secret:
+        # 1. cat ~/.kube/config | base64 | pbcopy  (copies to clipboard)
+        # 2. Go to GitHub repo → Settings → Secrets → New secret
+        # 3. Name: KUBECONFIG, Value: paste from clipboard
+
+      # -----------------------------------------------------------------------
+      # UPDATE IMAGE TAG
+      # -----------------------------------------------------------------------
+      # This is the key step that makes each deployment unique.
+      # We use Kustomize's `set image` command to update the container image
+      # tag without modifying the YAML files directly.
+      #
+      # WHY NOT EDIT THE YAML DIRECTLY?
+      # If we edited deployment.yml to change the image tag, we'd need to
+      # commit that change back to Git (noisy commits). Kustomize set image
+      # applies the change at deploy time, keeping Git clean.
+      #
+      # ALTERNATIVE APPROACH (GitOps):
+      # Some teams DO commit the image tag change to Git, then a tool like
+      # ArgoCD detects the change and deploys. This gives you Git as the
+      # single source of truth for what's deployed.
+      # -----------------------------------------------------------------------
+      - name: Set image tag
+        run: |
+          cd k8s/overlays/dev
+          kustomize edit set image payment-ledger-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag || 'latest' }}
+
+      # -----------------------------------------------------------------------
+      # DEPLOY
+      # -----------------------------------------------------------------------
+      - name: Deploy to dev
+        run: |
+          echo "Deploying to dev environment..."
+          kubectl apply -k k8s/overlays/dev/
+          echo ""
+          echo "Waiting for rollout to complete..."
+          kubectl rollout status deployment/payment-ledger -n payment-ledger --timeout=300s
+          echo ""
+          echo "Deployment complete! Current pods:"
+          kubectl get pods -n payment-ledger -l app.kubernetes.io/name=payment-ledger
+
+      # -----------------------------------------------------------------------
+      # SMOKE TEST
+      # -----------------------------------------------------------------------
+      # After deploying, verify the app is actually working.
+      # A smoke test is a quick, basic check - not a full test suite.
+      # "Does the building have smoke coming out of it?"
+      #
+      # We use kubectl port-forward to access the service from the CI runner,
+      # then hit the health endpoint.
+      # -----------------------------------------------------------------------
+      - name: Smoke test
+        run: |
+          echo "Running smoke test..."
+          kubectl port-forward svc/payment-ledger 8050:8050 -n payment-ledger &
+          PF_PID=$!
+          sleep 10
+
+          # Check health endpoint
+          HTTP_STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8050/actuator/health || echo "000")
+
+          kill $PF_PID 2>/dev/null || true
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Smoke test PASSED - health check returned $HTTP_STATUS"
+          else
+            echo "Smoke test FAILED - health check returned $HTTP_STATUS"
+            echo "Fetching pod logs for debugging..."
+            kubectl logs deployment/payment-ledger -n payment-ledger --tail=50
+            exit 1
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## Dev Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag || 'latest' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # =========================================================================
+  # JOB 2: DEPLOY TO STAGING (Manual Approval)
+  # =========================================================================
+  # Staging requires manual approval before deploying. This is the
+  # "pre-production" environment where QA validates before prod.
+  #
+  # WHY MANUAL APPROVAL?
+  # Staging mirrors production. Deploying there means:
+  # - QA team may be running tests against current staging
+  # - Performance tests may be in progress
+  # - Someone needs to verify the dev deployment looks good first
+  #
+  # HOW TO SET UP APPROVAL IN GITHUB:
+  # 1. Go to repo → Settings → Environments → New → "staging"
+  # 2. Check "Required reviewers"
+  # 3. Add team leads or senior engineers as reviewers
+  # 4. Optionally set "Wait timer" (e.g., 5 minutes after dev deploy)
+  # =========================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    # Only run if dev deployment succeeded
+    if: ${{ needs.deploy-dev.result == 'success' }}
+
+    environment:
+      name: staging
+      url: https://staging.payment-ledger.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.31.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Set image tag
+        run: |
+          cd k8s/overlays/staging
+          kustomize edit set image payment-ledger-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag || 'latest' }}
+
+      - name: Deploy to staging
+        run: |
+          echo "Deploying to staging environment..."
+          kubectl apply -k k8s/overlays/staging/
+          echo ""
+          echo "Waiting for rollout to complete..."
+          kubectl rollout status deployment/payment-ledger -n payment-ledger --timeout=300s
+          echo ""
+          echo "Deployment complete! Current pods:"
+          kubectl get pods -n payment-ledger -l app.kubernetes.io/name=payment-ledger
+
+      - name: Smoke test
+        run: |
+          kubectl port-forward svc/payment-ledger 8050:8050 -n payment-ledger &
+          PF_PID=$!
+          sleep 10
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8050/actuator/health || echo "000")
+          kill $PF_PID 2>/dev/null || true
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Staging smoke test PASSED"
+          else
+            echo "Staging smoke test FAILED - HTTP $HTTP_STATUS"
+            kubectl logs deployment/payment-ledger -n payment-ledger --tail=50
+            exit 1
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## Staging Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag || 'latest' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # =========================================================================
+  # JOB 3: DEPLOY TO PRODUCTION (Manual Approval + Extra Safeguards)
+  # =========================================================================
+  # Production deployment has the highest bar:
+  # - Requires approval from senior engineers or team leads
+  # - Only deploys code that passed staging
+  # - Has smoke tests with rollback on failure
+  #
+  # REAL-WORLD PRODUCTION SAFEGUARDS:
+  # 1. Deployment windows: Some companies only deploy Mon-Thu, 10am-4pm
+  # 2. Feature flags: Deploy code but keep features off until verified
+  # 3. Canary deployments: Roll out to 5% of traffic first
+  # 4. Automatic rollback: If error rate spikes, revert immediately
+  #
+  # We implement manual approval here. The other safeguards are covered
+  # in Phase 8 (Advanced Topics).
+  # =========================================================================
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: ${{ needs.deploy-staging.result == 'success' }}
+
+    environment:
+      name: production
+      url: https://payment-ledger.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.31.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_PROD }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+        # NOTE: Production uses a SEPARATE kubeconfig (KUBECONFIG_PROD)
+        # In real-world setups, production is a different cluster entirely.
+        # This limits blast radius - a misconfigured dev pipeline can't
+        # accidentally deploy to production.
+
+      # Record the current deployment for potential rollback
+      - name: Record current revision
+        id: pre-deploy
+        run: |
+          CURRENT_REVISION=$(kubectl rollout history deployment/payment-ledger -n payment-ledger | tail -2 | head -1 | awk '{print $1}')
+          echo "revision=$CURRENT_REVISION" >> $GITHUB_OUTPUT
+          echo "Current revision before deploy: $CURRENT_REVISION"
+
+      - name: Set image tag
+        run: |
+          cd k8s/overlays/prod
+          kustomize edit set image payment-ledger-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag || 'latest' }}
+
+      - name: Deploy to production
+        run: |
+          echo "=== DEPLOYING TO PRODUCTION ==="
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag || 'latest' }}"
+          echo ""
+          kubectl apply -k k8s/overlays/prod/
+          echo ""
+          echo "Waiting for rollout..."
+          kubectl rollout status deployment/payment-ledger -n payment-ledger --timeout=600s
+          echo ""
+          echo "Production pods:"
+          kubectl get pods -n payment-ledger -l app.kubernetes.io/name=payment-ledger
+
+      # -----------------------------------------------------------------------
+      # PRODUCTION SMOKE TEST WITH ROLLBACK
+      # -----------------------------------------------------------------------
+      # If the smoke test fails, we automatically roll back to the previous
+      # version. This is critical in production - a bad deploy should be
+      # reverted in seconds, not minutes.
+      #
+      # kubectl rollout undo is instant because K8s keeps the previous
+      # ReplicaSet around. It just scales the old one up and new one down.
+      # -----------------------------------------------------------------------
+      - name: Smoke test (with rollback on failure)
+        run: |
+          kubectl port-forward svc/payment-ledger 8050:8050 -n payment-ledger &
+          PF_PID=$!
+          sleep 15  # Extra time for prod (3 replicas take longer)
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8050/actuator/health || echo "000")
+          kill $PF_PID 2>/dev/null || true
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Production smoke test PASSED"
+          else
+            echo "Production smoke test FAILED - HTTP $HTTP_STATUS"
+            echo ""
+            echo "=== INITIATING ROLLBACK ==="
+            kubectl rollout undo deployment/payment-ledger -n payment-ledger
+            kubectl rollout status deployment/payment-ledger -n payment-ledger --timeout=300s
+            echo "Rollback complete. Previous version restored."
+            echo ""
+            echo "Pod logs from failed deployment:"
+            kubectl logs deployment/payment-ledger -n payment-ledger --tail=50
+            exit 1
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## Production Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag || 'latest' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "failure" ]; then
+            echo "**Action:** Automatic rollback was triggered" >> $GITHUB_STEP_SUMMARY
+          fi

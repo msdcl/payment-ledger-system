@@ -1,0 +1,51 @@
+# =============================================================================
+# Prometheus Configuration
+# =============================================================================
+#
+# HOW PROMETHEUS WORKS:
+# Prometheus uses a PULL model - every `scrape_interval` seconds, it sends
+# an HTTP GET request to each target's metrics endpoint and stores the response.
+#
+# Your Spring Boot app exposes metrics at /actuator/prometheus thanks to:
+# - spring-boot-starter-actuator (provides the endpoint)
+# - micrometer-registry-prometheus (formats metrics in Prometheus format)
+#
+# SCRAPE INTERVAL TRADE-OFF:
+# - Too frequent (1s): High load on targets, lots of storage
+# - Too infrequent (5m): You miss short-lived spikes
+# - 15s is the Prometheus default and works well for most apps
+#
+# =============================================================================
+
+global:
+  scrape_interval: 15s       # How often to pull metrics from targets
+  evaluation_interval: 15s   # How often to evaluate alerting rules
+  scrape_timeout: 10s        # Timeout for each scrape request
+
+scrape_configs:
+  # ---------------------------------------------------------------------------
+  # Prometheus self-monitoring
+  # Yes, Prometheus monitors itself! This is useful to check if Prometheus
+  # is healthy and how much memory/storage it's using.
+  # ---------------------------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ---------------------------------------------------------------------------
+  # Payment Ledger Application
+  # ---------------------------------------------------------------------------
+  # The `metrics_path` defaults to /metrics, but Spring Boot Actuator uses
+  # /actuator/prometheus, so we override it.
+  #
+  # The target "app:8050" works because Prometheus is on the same Docker
+  # network as the app - "app" resolves to the app container's IP address.
+  # ---------------------------------------------------------------------------
+  - job_name: 'payment-ledger'
+    metrics_path: '/actuator/prometheus'
+    scrape_interval: 10s      # Scrape app more frequently for better granularity
+    static_configs:
+      - targets: ['app:8050']
+        labels:
+          application: 'payment-ledger'
+          environment: 'local'

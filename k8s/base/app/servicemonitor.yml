@@ -1,0 +1,59 @@
+# =============================================================================
+# ServiceMonitor - Tell Prometheus to Scrape payment-ledger
+# =============================================================================
+#
+# WHAT: A ServiceMonitor is a Kubernetes Custom Resource (CRD) that tells the
+# Prometheus Operator: "Hey, there's a service I want you to scrape for metrics."
+#
+# HOW IT WORKS (the chain):
+# 1. You create this ServiceMonitor
+# 2. The Prometheus Operator (running in monitoring namespace) watches for it
+# 3. Operator generates Prometheus scrape config automatically
+# 4. Prometheus picks up the new config (no restart needed!)
+# 5. Prometheus starts scraping your /actuator/prometheus endpoint
+#
+# BEFORE ServiceMonitors existed, you had to manually edit prometheus.yml
+# and restart Prometheus every time you added a new service. With hundreds
+# of microservices, that's a nightmare. ServiceMonitors make it self-service.
+#
+# SELECTOR MATCHING:
+# The ServiceMonitor uses a label selector to find which K8s Service to scrape.
+# It matches against the Service's metadata.labels (NOT the pod labels).
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payment-ledger
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: payment-ledger
+    app.kubernetes.io/component: monitoring
+spec:
+  # Which Service(s) to scrape - matches by label selector
+  # This finds our payment-ledger Service because it has these labels
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payment-ledger
+      app.kubernetes.io/component: api
+
+  # Which namespace(s) to look for the Service in
+  # Without this, it only looks in the ServiceMonitor's own namespace
+  namespaceSelector:
+    matchNames:
+      - payment-ledger
+
+  # How to scrape the matched Service
+  endpoints:
+    - port: http                           # Must match the Service port NAME (not number)
+      path: /actuator/prometheus           # Spring Boot Actuator Prometheus endpoint
+      interval: 15s                        # How often to scrape (15s is standard)
+      # -----------------------------------------------------------------------
+      # SCRAPE INTERVAL TRADEOFFS:
+      # - 15s: Good balance of resolution and load (industry standard)
+      # - 5s:  High resolution, but more storage and CPU (use for critical paths)
+      # - 30s: Less storage, but you might miss short spikes
+      # - 60s: Minimum for most use cases (misses a lot of transient issues)
+      #
+      # REAL-WORLD: Most companies use 15-30s for application metrics and
+      # 60s for infrastructure metrics (node_exporter, kube-state-metrics)
+      # -----------------------------------------------------------------------

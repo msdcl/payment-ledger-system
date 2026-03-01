@@ -1,0 +1,51 @@
+# =============================================================================
+# Service - Stable Network Endpoint for Your Pods
+# =============================================================================
+#
+# WHAT: A Service provides a stable DNS name and IP address for a set of pods.
+# Pods come and go (crash, scale, update), but the Service endpoint never changes.
+#
+# HOW IT WORKS:
+# 1. The Service watches for pods matching its `selector` labels
+# 2. It maintains a list of pod IPs (called "endpoints")
+# 3. When traffic hits the Service, it load-balances to one of the pods
+# 4. If a pod dies, it's removed from the endpoints automatically
+#
+# DNS RESOLUTION:
+# Within the same namespace: just use "payment-ledger"
+# Across namespaces: "payment-ledger.payment-ledger.svc.cluster.local"
+#                     ↑ service name  ↑ namespace    ↑ always this suffix
+#
+# SERVICE TYPES:
+# - ClusterIP (default): Internal only. Other pods can reach it, but not the outside world.
+# - NodePort: Exposes on port 30000-32767 on every node. Good for dev.
+# - LoadBalancer: Creates a cloud load balancer (AWS ELB, GCP LB). For production.
+#
+# We use NodePort here so you can access the app from your browser.
+# In production, you'd use LoadBalancer or an Ingress controller instead.
+#
+# DOCKER COMPOSE EQUIVALENT: The `ports:` mapping in docker-compose.yml
+# But Services also add load balancing across replicas - docker-compose doesn't.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-ledger
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: payment-ledger
+    app.kubernetes.io/component: api
+spec:
+  # NodePort exposes the service on a static port on each node
+  # You'll access it at localhost:<nodePort>
+  type: NodePort
+  selector:
+    # Must match the pod labels in the Deployment
+    app.kubernetes.io/name: payment-ledger
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8050             # Service port (internal cluster access)
+      targetPort: http       # Container port (references the named port in Deployment)
+      nodePort: 30050        # External port (access from your machine)
+      protocol: TCP

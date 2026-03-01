@@ -1,0 +1,346 @@
+# =============================================================================
+# CI Pipeline - Continuous Integration
+# =============================================================================
+#
+# WHAT THIS DOES:
+# Every time you push code or open a PR, this pipeline automatically:
+# 1. Checks out your code
+# 2. Sets up Java 20 with Gradle caching
+# 3. Builds the project
+# 4. Runs unit tests
+# 5. Runs integration tests (with real PostgreSQL, Redis, Kafka)
+# 6. Generates code coverage report
+# 7. Uploads test results as downloadable artifacts
+#
+# WHY CI MATTERS:
+# Without CI, broken code silently merges into master. With CI, every push
+# gets immediate automated feedback. If tests fail, the PR gets a red X
+# and can't be merged (if you enable branch protection rules).
+#
+# REAL-WORLD:
+# At companies like Google, CI runs on every single commit. Some companies
+# have thousands of builds per day. The key principle: "If it hurts, do it
+# more often" - frequent integration catches bugs early when they're cheap to fix.
+#
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# WORKFLOW NAME
+# This appears in the GitHub Actions tab and on PR status checks
+# ---------------------------------------------------------------------------
+name: CI Pipeline
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# `on` defines WHEN this workflow runs. Common triggers:
+# - push: when code is pushed to a branch
+# - pull_request: when a PR is opened/updated
+# - schedule: cron-based (e.g., nightly builds)
+# - workflow_dispatch: manual trigger from GitHub UI
+#
+# REAL-WORLD PATTERN:
+# Most teams run CI on PRs (to validate before merge) and on master
+# (to ensure master is always green after merge).
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  # Allow manual trigger from GitHub UI (useful for debugging CI itself)
+  workflow_dispatch:
+
+# ---------------------------------------------------------------------------
+# JOBS
+# ---------------------------------------------------------------------------
+# A workflow can have multiple jobs. Jobs run IN PARALLEL by default.
+# If you need sequential execution, use `needs:` to create dependencies.
+#
+# Each job gets a fresh virtual machine (runner). Nothing persists between
+# jobs unless you explicitly upload/download artifacts.
+# ---------------------------------------------------------------------------
+jobs:
+
+  # =========================================================================
+  # JOB 1: BUILD & UNIT TESTS
+  # =========================================================================
+  # This job compiles the code and runs fast unit tests (no external services).
+  # Unit tests use mocks instead of real databases, so they're fast (~seconds).
+  #
+  # WHY SEPARATE FROM INTEGRATION TESTS?
+  # Unit tests are fast (seconds) and catch most bugs. Integration tests are
+  # slow (minutes) and need real services. By separating them:
+  # 1. You get fast feedback from unit tests first
+  # 2. If unit tests fail, you don't waste time spinning up databases
+  # 3. You can run them in parallel for faster total CI time
+  # =========================================================================
+  build:
+    name: Build & Unit Tests
+    # The runner environment. GitHub provides free runners:
+    # - ubuntu-latest: Linux (most common, cheapest)
+    # - macos-latest: macOS (for iOS/Swift builds)
+    # - windows-latest: Windows (for .NET builds)
+    #
+    # REAL-WORLD: Most Java/Spring Boot projects use ubuntu-latest.
+    # Some companies run self-hosted runners for security or performance.
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # STEP 1: Checkout code
+      # -----------------------------------------------------------------------
+      # `uses:` runs a pre-built Action from the GitHub Marketplace.
+      # actions/checkout@v4 clones your repo into the runner's workspace.
+      #
+      # Without this, the runner has an empty filesystem - it doesn't
+      # automatically have your code.
+      # -----------------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # STEP 2: Set up Java
+      # -----------------------------------------------------------------------
+      # Installs the specified Java version on the runner.
+      # `distribution: temurin` = Eclipse Temurin (the most popular free JDK)
+      #
+      # WHY CACHE GRADLE?
+      # Gradle downloads dependencies on every build. Without caching, each CI
+      # run downloads ~200MB of dependencies from Maven Central. With caching,
+      # subsequent runs reuse downloaded dependencies → builds go from 5min to 1min.
+      #
+      # The cache key is based on *.gradle files - if dependencies change,
+      # the cache is invalidated and rebuilt.
+      # -----------------------------------------------------------------------
+      - name: Set up Java 20
+        uses: actions/setup-java@v4
+        with:
+          java-version: '20'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      # -----------------------------------------------------------------------
+      # STEP 3: Grant execute permission to Gradle wrapper
+      # -----------------------------------------------------------------------
+      # Git doesn't always preserve file permissions. The gradlew script needs
+      # to be executable, so we ensure that here.
+      # -----------------------------------------------------------------------
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      # -----------------------------------------------------------------------
+      # STEP 4: Build the project
+      # -----------------------------------------------------------------------
+      # `./gradlew build -x test` compiles the code and creates the JAR
+      # without running tests (we run tests separately for clearer reporting).
+      #
+      # WHY -x test?
+      # We separate build from test so that if tests fail, we can still see
+      # if the code compiles. This helps diagnose whether the issue is a
+      # compilation error or a test failure.
+      # -----------------------------------------------------------------------
+      - name: Build project
+        run: ./gradlew build -x test --no-daemon
+
+      # -----------------------------------------------------------------------
+      # STEP 5: Run unit tests
+      # -----------------------------------------------------------------------
+      # Unit tests run WITHOUT external services (PostgreSQL, Redis, Kafka).
+      # They use mocks and in-memory alternatives.
+      #
+      # `--no-daemon` prevents Gradle from keeping a background process alive
+      # on the CI runner (wastes resources and can cause issues).
+      # -----------------------------------------------------------------------
+      - name: Run unit tests
+        run: ./gradlew test --no-daemon
+        env:
+          # Spring profile that disables external service connections for unit tests
+          SPRING_PROFILES_ACTIVE: test
+
+      # -----------------------------------------------------------------------
+      # STEP 6: Upload test results
+      # -----------------------------------------------------------------------
+      # Even if tests fail, we want to see the results. `if: always()` ensures
+      # this step runs regardless of whether previous steps succeeded or failed.
+      #
+      # Artifacts are downloadable files that persist after the workflow completes.
+      # You can download them from the Actions tab in GitHub.
+      #
+      # REAL-WORLD: Teams often upload test reports, coverage reports, and
+      # built JARs as artifacts. Some CI systems display test results directly
+      # in the PR (GitHub can do this with additional actions).
+      # -----------------------------------------------------------------------
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/reports/tests/
+          retention-days: 7    # Auto-delete after 7 days to save storage
+
+      # -----------------------------------------------------------------------
+      # STEP 7: Upload build artifact (JAR)
+      # -----------------------------------------------------------------------
+      # Upload the built JAR so other jobs (like Docker build) can use it
+      # without rebuilding. This is faster and ensures consistency.
+      # -----------------------------------------------------------------------
+      # -----------------------------------------------------------------------
+      # STEP 7: Generate code coverage report
+      # -----------------------------------------------------------------------
+      # JaCoCo generates coverage data during test execution. This step
+      # creates the human-readable HTML and machine-readable XML reports.
+      #
+      # The coverage report shows: which lines were executed, which branches
+      # were taken, and the overall coverage percentage.
+      # -----------------------------------------------------------------------
+      - name: Generate coverage report
+        run: ./gradlew jacocoTestReport --no-daemon
+        if: always()
+
+      # -----------------------------------------------------------------------
+      # STEP 8: Upload coverage report
+      # -----------------------------------------------------------------------
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/reports/jacoco/
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # STEP 9: Upload build artifact (JAR)
+      # -----------------------------------------------------------------------
+      # Upload the built JAR so other jobs (like Docker build) can use it
+      # without rebuilding. This is faster and ensures consistency.
+      # -----------------------------------------------------------------------
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs/*.jar
+          retention-days: 1
+
+  # =========================================================================
+  # JOB 2: INTEGRATION TESTS
+  # =========================================================================
+  # Integration tests verify that your app works with REAL external services.
+  # Unlike unit tests that use mocks, these tests connect to actual PostgreSQL,
+  # Redis, and Kafka instances.
+  #
+  # GITHUB ACTIONS SERVICE CONTAINERS:
+  # The `services:` block spins up Docker containers alongside your job.
+  # These containers are on the same network as the runner, so your tests
+  # can connect to them via `localhost`.
+  #
+  # This is conceptually similar to docker-compose, but managed by GitHub
+  # Actions. The key difference from your local docker-compose:
+  # - In docker-compose: services find each other by service name (e.g., "postgres")
+  # - In GitHub Actions: tests connect via localhost with mapped ports
+  #
+  # WHY NOT USE TESTCONTAINERS IN CI?
+  # Your project uses TestContainers (which starts Docker containers from
+  # within tests). That works too! But service containers are:
+  # 1. Faster (started once, shared across all tests)
+  # 2. More predictable (managed by the CI platform)
+  # 3. Easier to debug (clear separation of concerns)
+  # Some teams use both - service containers in CI, TestContainers locally.
+  # =========================================================================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    # This job only runs AFTER the build job succeeds.
+    # If build fails, there's no point running integration tests.
+    needs: build
+
+    # ---------------------------------------------------------------------
+    # SERVICE CONTAINERS
+    # ---------------------------------------------------------------------
+    # These Docker containers start before your job steps and are accessible
+    # via localhost on the mapped ports.
+    #
+    # HEALTH CHECKS: GitHub Actions waits for the health check to pass
+    # before running your job steps. This prevents the "database not ready"
+    # race condition we solved in docker-compose with `depends_on`.
+    # ---------------------------------------------------------------------
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: payment_ledger
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      kafka:
+        image: confluentinc/cp-kafka:7.5.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+        options: >-
+          --health-cmd "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 30s
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 20
+        uses: actions/setup-java@v4
+        with:
+          java-version: '20'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      # Run the full test suite against real services
+      - name: Run integration tests
+        run: ./gradlew test --no-daemon
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/payment_ledger
+          SPRING_DATASOURCE_USERNAME: postgres
+          SPRING_DATASOURCE_PASSWORD: postgres
+          SPRING_DATA_REDIS_HOST: localhost
+          SPRING_DATA_REDIS_PORT: 6379
+          SPRING_KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: build/reports/tests/
+          retention-days: 7

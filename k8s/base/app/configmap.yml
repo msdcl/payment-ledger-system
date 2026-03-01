@@ -1,0 +1,57 @@
+# =============================================================================
+# ConfigMap - Externalized Application Configuration
+# =============================================================================
+#
+# WHAT: A ConfigMap stores non-sensitive configuration as key-value pairs.
+# It decouples configuration from your Docker image, so the SAME image
+# can run in dev, staging, and prod with different configs.
+#
+# WHY NOT JUST USE ENV VARS IN THE DEPLOYMENT?
+# You could, but ConfigMaps give you:
+# 1. Reusability: Multiple pods can reference the same ConfigMap
+# 2. Separation: Config changes don't require redeploying the app
+# 3. Visibility: `kubectl get configmap` shows all configs in one place
+# 4. Kustomize: Easy to override per-environment (Phase 5)
+#
+# HOW PODS CONSUME CONFIGMAPS:
+# - As environment variables (what we do below)
+# - As mounted files (useful for application.properties)
+# - As command-line arguments
+#
+# REAL-WORLD: Teams often mount the entire application.properties as a
+# ConfigMap file, so they can change config without touching the image.
+#
+# DOCKER COMPOSE EQUIVALENT: The `environment:` block in docker-compose.yml
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-ledger-config
+  namespace: payment-ledger
+  labels:
+    app.kubernetes.io/name: payment-ledger
+    app.kubernetes.io/component: config
+data:
+  # Spring profile - activates application-docker.properties
+  SPRING_PROFILES_ACTIVE: "docker"
+
+  # Database connection - "postgres" resolves via K8s Service DNS
+  # In K8s, the full DNS name is: postgres.payment-ledger.svc.cluster.local
+  # But within the same namespace, just "postgres" works (short DNS)
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/payment_ledger"
+
+  # Redis - same DNS resolution as above
+  SPRING_DATA_REDIS_HOST: "redis"
+  SPRING_DATA_REDIS_PORT: "6379"
+
+  # Kafka - use StatefulSet pod FQDN since advertised listener uses this address
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-0.kafka.payment-ledger.svc.cluster.local:9092"
+
+  # JVM settings for containers
+  # -XX:MaxRAMPercentage=75 tells the JVM to use at most 75% of the
+  # container's memory limit. This prevents OOM kills while leaving
+  # room for non-heap memory (threads, native memory, etc.)
+  JAVA_OPTS: "-Xms256m -Xmx512m -XX:MaxRAMPercentage=75"
+
+  # Logging
+  LOGGING_LEVEL_COM_FLAGSHIP: "INFO"

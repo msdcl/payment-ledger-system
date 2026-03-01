@@ -1,0 +1,343 @@
+# =============================================================================
+# Docker Compose - Multi-Container Application Orchestration
+# =============================================================================
+#
+# WHY DOCKER COMPOSE?
+# -------------------
+# Your payment-ledger needs 5+ services to run. Without Compose, you'd manually
+# run each container with long `docker run` commands, manage networking yourself,
+# and handle startup order. Compose lets you define everything declaratively in
+# one file and run it all with `docker compose up`.
+#
+# REAL-WORLD USAGE:
+# - Dev teams use this so every developer has an identical local environment
+# - CI pipelines spin up the full stack for integration tests
+# - Some teams use Compose for lightweight staging environments
+#
+# NETWORKING:
+# Docker Compose automatically creates a bridge network for all services.
+# Services can reach each other by their service name (e.g., the app connects
+# to PostgreSQL using hostname "postgres" instead of "localhost").
+# This is DNS-based service discovery - the same concept Kubernetes uses.
+#
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # APPLICATION
+  # ---------------------------------------------------------------------------
+  # Builds from your existing Dockerfile (multi-stage build)
+  # The `depends_on` with `condition: service_healthy` ensures the app only
+  # starts AFTER its dependencies are actually ready (not just "started").
+  #
+  # WHY THIS MATTERS: Without health checks, your app might start before
+  # PostgreSQL is ready to accept connections → crash → restart loop.
+  # In production (Kubernetes), this is handled by readiness probes instead.
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: payment-ledger-app
+    ports:
+      - "8050:8050"         # Maps host:container - access app at localhost:8050
+    environment:
+      # Spring profile for containerized runtime
+      SPRING_PROFILES_ACTIVE: docker
+      # Override connection URLs to use Docker service names instead of localhost
+      # Inside the Docker network, "postgres" resolves to the postgres container's IP
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/payment_ledger
+      SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-postgres}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # Java memory settings - important for containers
+      # Without this, the JVM might try to use more memory than the container allows → OOM kill
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - payment-ledger-net
+    # Restart policy - "on-failure" restarts only on non-zero exit codes
+    # "always" would restart even on manual stops, which is annoying in dev
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # POSTGRESQL
+  # ---------------------------------------------------------------------------
+  # WHY STATEFUL SERVICES NEED VOLUMES:
+  # Containers are ephemeral - when you stop them, all data inside is lost.
+  # Named volumes persist data across container restarts. Without the volume
+  # below, every `docker compose down` would wipe your database.
+  #
+  # REAL-WORLD: In production, you'd use managed databases (AWS RDS, Cloud SQL)
+  # rather than running PostgreSQL in a container. But for dev/testing, this
+  # is exactly what teams do.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine     # Alpine = smaller image (~80MB vs ~400MB)
+    container_name: payment-ledger-postgres
+    ports:
+      - "5432:5432"               # Expose to host so you can connect with pgAdmin/DBeaver
+    environment:
+      POSTGRES_DB: payment_ledger
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data    # Named volume for persistence
+    healthcheck:
+      # pg_isready checks if PostgreSQL is accepting connections
+      # This is better than just checking if the port is open
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payment_ledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s           # Give PostgreSQL time to initialize on first run
+    networks:
+      - payment-ledger-net
+
+  # ---------------------------------------------------------------------------
+  # REDIS
+  # ---------------------------------------------------------------------------
+  # Used for: Idempotency key caching in your payment API
+  # WHY REDIS IN YOUR APP: When a client sends a payment request with an
+  # Idempotency-Key header, Redis provides sub-millisecond lookups to check
+  # if that key was already processed. This prevents duplicate payments.
+  #
+  # The `--appendonly yes` flag enables AOF (Append-Only File) persistence,
+  # meaning Redis writes every operation to disk. Without this, a restart
+  # would lose all cached data.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: payment-ledger-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payment-ledger-net
+
+  # ---------------------------------------------------------------------------
+  # ZOOKEEPER
+  # ---------------------------------------------------------------------------
+  # WHY ZOOKEEPER? Kafka historically depends on ZooKeeper for:
+  # - Broker coordination (which broker is the leader for a partition)
+  # - Topic configuration storage
+  # - Consumer group management
+  #
+  # IMPORTANT: Kafka is moving away from ZooKeeper (KRaft mode). In newer
+  # Kafka versions (3.3+), ZooKeeper is optional. But for learning, the
+  # traditional setup is more common in enterprise environments you'll encounter.
+  #
+  # REAL-WORLD: Many companies still run ZooKeeper-based Kafka in production.
+  # Migration to KRaft is ongoing industry-wide (2024-2026).
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: payment-ledger-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000      # Base time unit for heartbeats (ms)
+    networks:
+      - payment-ledger-net
+
+  # ---------------------------------------------------------------------------
+  # KAFKA
+  # ---------------------------------------------------------------------------
+  # Used for: Transactional outbox event publishing in your payment system
+  #
+  # WHY TWO LISTENERS?
+  # Kafka needs separate listeners for internal (container-to-container) and
+  # external (host machine) communication because the hostnames are different:
+  # - Inside Docker network: containers reach Kafka via "kafka:29092"
+  # - From your host machine: you reach Kafka via "localhost:9092"
+  #
+  # This dual-listener pattern is one of the most confusing parts of running
+  # Kafka in Docker - and it's a common interview topic!
+  #
+  # REAL-WORLD: In production, you'd use managed Kafka (AWS MSK, Confluent Cloud)
+  # or run a multi-broker cluster. Single-broker is fine for dev/testing.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: payment-ledger-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Two listeners: one for Docker-internal, one for host access
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1    # Single broker = replication factor 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Auto-create topics when a producer first writes to them
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    depends_on:
+      - zookeeper
+    healthcheck:
+      # Check if Kafka can list its own topics (proves it's fully operational)
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s           # Kafka takes a while to fully initialize
+    networks:
+      - payment-ledger-net
+
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS
+  # ---------------------------------------------------------------------------
+  # WHY PROMETHEUS?
+  # Your app already exposes metrics at /actuator/prometheus (Micrometer).
+  # Prometheus is a time-series database that scrapes these metrics at regular
+  # intervals and stores them. It's the de-facto standard for monitoring in
+  # the Kubernetes/cloud-native ecosystem.
+  #
+  # HOW IT WORKS: Prometheus uses a PULL model - it periodically fetches
+  # metrics from your app (unlike push-based systems where apps send metrics).
+  # This is simpler and more reliable: if your app is down, Prometheus just
+  # records "no data" instead of losing metrics.
+  #
+  # REAL-WORLD: Almost every company running Kubernetes uses Prometheus.
+  # It's often bundled with Grafana for visualization and Alertmanager for alerts.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: payment-ledger-prometheus
+    ports:
+      - "9090:9090"               # Prometheus UI at localhost:9090
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro   # Config file (read-only)
+      - prometheus_data:/prometheus                                     # Data persistence
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'   # Keep 15 days of metrics
+    networks:
+      - payment-ledger-net
+
+  # ---------------------------------------------------------------------------
+  # GRAFANA
+  # ---------------------------------------------------------------------------
+  # WHY GRAFANA?
+  # Prometheus stores metrics but its built-in UI is basic. Grafana provides
+  # rich, interactive dashboards with graphs, gauges, and alerts. It can
+  # pull data from Prometheus (and many other sources).
+  #
+  # REAL-WORLD: Grafana is the industry standard for operational dashboards.
+  # Teams build dashboards showing request rates, error rates, latency (the
+  # "RED method"), and business metrics. On-call engineers use these dashboards
+  # during incidents.
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: payment-ledger-grafana
+    ports:
+      - "3000:3000"               # Grafana UI at localhost:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - payment-ledger-net
+
+  # ---------------------------------------------------------------------------
+  # JENKINS
+  # ---------------------------------------------------------------------------
+  # WHY JENKINS?
+  # Jenkins is the most widely deployed CI/CD server in enterprise environments.
+  # While GitHub Actions is cloud-hosted, Jenkins is self-hosted - you control
+  # the infrastructure. This matters for:
+  # - Compliance: Banks/healthcare can't send code to external CI services
+  # - Control: You manage the plugins, security, and scaling
+  # - Cost: No per-minute billing; just your own infrastructure costs
+  #
+  # ARCHITECTURE:
+  # This container runs the Jenkins "controller" (manages jobs, UI, config).
+  # In production, you'd also have separate "agent" containers that execute
+  # the actual builds. For learning, the controller can run builds directly.
+  #
+  # DOCKER SOCKET MOUNTING:
+  # We mount /var/run/docker.sock so Jenkins can build Docker images.
+  # This is called "Docker-outside-of-Docker" (DooD) - Jenkins uses the
+  # HOST's Docker daemon rather than running Docker inside Docker.
+  #
+  # SECURITY NOTE: Mounting the Docker socket gives Jenkins root-equivalent
+  # access to the host. In production, use alternatives like Kaniko (builds
+  # images without Docker daemon) or run Jenkins agents as K8s pods.
+  # ---------------------------------------------------------------------------
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: payment-ledger-jenkins
+    ports:
+      - "8888:8080"             # Jenkins web UI (mapped to 8888 since 8080 is in use)
+      - "50000:50000"           # Agent communication port (JNLP protocol)
+    environment:
+      # Skip the initial setup wizard for faster startup
+      # In production, you'd go through the wizard for proper security setup
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=true"
+    volumes:
+      - jenkins_home:/var/jenkins_home                     # Persist Jenkins config, jobs, plugins
+      - /var/run/docker.sock:/var/run/docker.sock          # Docker-outside-of-Docker
+    networks:
+      - payment-ledger-net
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+# Named volumes are managed by Docker and persist across container restarts.
+# They live in Docker's storage area (not in your project directory).
+#
+# To see where they are: `docker volume inspect payment-ledger_postgres_data`
+# To delete all data: `docker compose down -v` (the -v flag removes volumes)
+#
+# WHY NAMED VOLUMES vs BIND MOUNTS?
+# - Named volumes: Docker manages the location, better performance on Mac/Windows
+# - Bind mounts (./data:/var/lib/...): You control the location, useful for
+#   config files you want to edit (like prometheus.yml above)
+# =============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  jenkins_home:
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+# A custom bridge network provides:
+# 1. DNS-based service discovery (containers find each other by name)
+# 2. Network isolation (these containers can't talk to other Docker containers)
+# 3. Automatic DNS resolution (no need to know IP addresses)
+#
+# Without a custom network, Docker Compose creates a default one, but being
+# explicit is better practice - it makes the architecture visible in the config.
+#
+# THIS IS THE SAME CONCEPT as Kubernetes Services - in K8s, pods find each
+# other via DNS names like "postgres.payment-ledger.svc.cluster.local"
+# =============================================================================
+networks:
+  payment-ledger-net:
+    driver: bridge
