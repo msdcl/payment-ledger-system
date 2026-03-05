@@ -1,7 +1,9 @@
 package com.flagship.payment_ledger.payment;
 
 import com.flagship.payment_ledger.payment.dto.CreatePaymentRequest;
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -18,15 +20,41 @@ import java.util.UUID;
  * Generates continuous data for Grafana dashboard verification.
  */
 @Component
-@RequiredArgsConstructor
 @Slf4j
 public class PaymentLoadRunner {
 
     private static final int TOTAL_PAYMENTS = 50;
 
     private final PaymentController paymentController;
+    private final Counter jobRunsTotal;
+    private final Counter jobSuccessTotal;
+    private final Counter jobFailureTotal;
+    private final Timer jobDurationTimer;
 
     private final Random random = new Random();
+
+    public PaymentLoadRunner(PaymentController paymentController, MeterRegistry registry) {
+        this.paymentController = paymentController;
+
+        this.jobRunsTotal = Counter.builder("loadrunner.job.runs")
+                .description("Total number of scheduled job executions")
+                .register(registry);
+
+        this.jobSuccessTotal = Counter.builder("loadrunner.job.payments")
+                .tag("result", "success")
+                .description("Number of payments created by load runner")
+                .register(registry);
+
+        this.jobFailureTotal = Counter.builder("loadrunner.job.payments")
+                .tag("result", "failure")
+                .description("Number of payments failed in load runner")
+                .register(registry);
+
+        this.jobDurationTimer = Timer.builder("loadrunner.job.duration")
+                .description("Time taken to complete a scheduled job run")
+                .publishPercentiles(0.5, 0.95, 0.99)
+                .register(registry);
+    }
 
     private final List<UUID> fromAccounts = List.of(
             UUID.fromString("11111111-1111-1111-1111-111111111111"),
@@ -49,6 +77,8 @@ public class PaymentLoadRunner {
     @Scheduled(fixedRate = 600000)
     public void createPayments() {
         log.info("Scheduled job started - creating {} payments", TOTAL_PAYMENTS);
+        jobRunsTotal.increment();
+        Timer.Sample sample = Timer.start();
 
         int success = 0;
         int failed = 0;
@@ -67,11 +97,22 @@ public class PaymentLoadRunner {
                 log.info("[{}/{}] Created payment | {} {} | status={}",
                         i, TOTAL_PAYMENTS, amount, currency, response.getStatusCode().value());
                 success++;
+
+                // Random delay between 500ms-1000ms to simulate realistic traffic
+                Thread.sleep(500 + random.nextInt(501));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Scheduled job interrupted");
+                break;
             } catch (Exception e) {
                 log.error("[{}/{}] Failed: {}", i, TOTAL_PAYMENTS, e.getMessage());
                 failed++;
             }
         }
+
+        sample.stop(jobDurationTimer);
+        jobSuccessTotal.increment(success);
+        jobFailureTotal.increment(failed);
 
         log.info("Scheduled job complete: {} succeeded, {} failed out of {}", success, failed, TOTAL_PAYMENTS);
     }

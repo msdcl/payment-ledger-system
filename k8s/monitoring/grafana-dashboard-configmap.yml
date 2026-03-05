@@ -292,6 +292,68 @@ data:
             { "expr": "rate(kafka_producer_record_send_total{job=\"payment-ledger\"}[5m])", "legendFormat": "sent" },
             { "expr": "rate(kafka_producer_record_error_total{job=\"payment-ledger\"}[5m])", "legendFormat": "errors" }
           ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
+          "id": 104,
+          "title": "Load Runner (Scheduled Job)",
+          "type": "row"
+        },
+        {
+          "title": "Job Runs Total",
+          "description": "Total number of scheduled job executions. If this stops increasing, the job is not running.",
+          "type": "stat",
+          "gridPos": { "h": 6, "w": 4, "x": 0, "y": 49 },
+          "id": 15,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [{ "color": "green", "value": null }] } } },
+          "targets": [
+            { "expr": "loadrunner_job_runs_total{job=\"payment-ledger\"}", "legendFormat": "runs" }
+          ]
+        },
+        {
+          "title": "Job Duration (seconds)",
+          "description": "How long each scheduled job run takes to complete",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 10, "x": 4, "y": 49 },
+          "id": 16,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 10, "lineWidth": 2, "drawStyle": "bars" }
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "p99" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "p95" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "p50" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+            ]
+          },
+          "targets": [
+            { "expr": "loadrunner_job_duration_seconds{job=\"payment-ledger\", quantile=\"0.5\"}", "legendFormat": "p50" },
+            { "expr": "loadrunner_job_duration_seconds{job=\"payment-ledger\", quantile=\"0.95\"}", "legendFormat": "p95" },
+            { "expr": "loadrunner_job_duration_seconds{job=\"payment-ledger\", quantile=\"0.99\"}", "legendFormat": "p99" }
+          ]
+        },
+        {
+          "title": "Payments Created vs Failed",
+          "description": "Success vs failure count from each scheduled job run",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 10, "x": 14, "y": 49 },
+          "id": 17,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2 } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "success" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+              { "matcher": { "id": "byName", "options": "failure" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+            ]
+          },
+          "targets": [
+            { "expr": "rate(loadrunner_job_payments_total{job=\"payment-ledger\", result=\"success\"}[10m])", "legendFormat": "success" },
+            { "expr": "rate(loadrunner_job_payments_total{job=\"payment-ledger\", result=\"failure\"}[10m])", "legendFormat": "failure" }
+          ]
         }
       ],
       "schemaVersion": 39,
