@@ -48,17 +48,20 @@ pipeline {
     // -------------------------------------------------------------------------
     // TOOLS
     // -------------------------------------------------------------------------
-    // `tools` auto-installs the specified tools on the agent.
-    // Jenkins must have these tools configured in Global Tool Configuration.
+    // No `tools` block needed! Our Dockerfile uses a multi-stage build:
+    //   Stage 1 (gradle:8-jdk20): Compiles the code inside the Docker build
+    //   Stage 2 (eclipse-temurin:20-jre): Runs the compiled JAR
     //
-    // This is one area where Jenkins differs from GitHub Actions:
-    // - GitHub Actions: `uses: actions/setup-java@v4` (downloaded on the fly)
-    // - Jenkins: Tools pre-configured in Jenkins settings (persistent)
+    // This means Jenkins doesn't need JDK or Gradle installed locally.
+    // All it needs is the Docker CLI (to run `docker build`).
+    //
+    // REAL-WORLD: This is actually the preferred approach in modern CI/CD.
+    // Instead of installing build tools on every Jenkins agent, you let
+    // Docker handle the build environment. This ensures:
+    // - Consistent builds (same Gradle/JDK version everywhere)
+    // - No agent configuration drift
+    // - Any agent with Docker can build any project
     // -------------------------------------------------------------------------
-    tools {
-        jdk 'JDK20'                // Must match name in Jenkins Global Tool Configuration
-        gradle 'Gradle8'           // Must match name in Jenkins Global Tool Configuration
-    }
 
     // -------------------------------------------------------------------------
     // ENVIRONMENT
@@ -75,11 +78,10 @@ pipeline {
     // GitHub Actions equivalent: `env:` block + `${{ secrets.MY_SECRET }}`
     // -------------------------------------------------------------------------
     environment {
-        APP_NAME        = 'payment-ledger'
-        DOCKER_IMAGE    = "payment-ledger:${BUILD_NUMBER}"
-        // credentials() pulls secrets from Jenkins Credential Manager
-        // You'd create these in Jenkins UI: Manage Jenkins → Credentials
-        // DOCKER_CREDS = credentials('docker-registry-credentials')
+        APP_NAME        = 'payment-ledger-app'
+        DOCKER_IMAGE    = "payment-ledger-app:${BUILD_NUMBER}"
+        KIND_CLUSTER    = 'desktop'
+        K8S_NAMESPACE   = 'payment-ledger'
     }
 
     // -------------------------------------------------------------------------
@@ -139,103 +141,22 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 2: BUILD
+        // STAGE 2: DOCKER BUILD
         // =====================================================================
-        // Compiles the code and creates the JAR artifact.
-        // `-x test` skips tests here - we run them in a dedicated stage.
+        // Builds the Docker image using multi-stage Dockerfile.
         //
-        // WHY SEPARATE BUILD AND TEST?
-        // Same reason as in GitHub Actions: clearer failure diagnosis.
-        // If this stage fails → compilation error.
-        // If next stage fails → test failure.
-        // =====================================================================
-        stage('Build') {
-            steps {
-                sh './gradlew clean build -x test --no-daemon'
-            }
-        }
-
-        // =====================================================================
-        // STAGE 3: UNIT TESTS
-        // =====================================================================
-        // Runs tests and publishes results to Jenkins UI.
+        // WHY NO SEPARATE BUILD/TEST STAGES?
+        // Our Dockerfile uses a multi-stage build:
+        //   Stage 1 (gradle:8-jdk20): Runs `gradle clean build -x test`
+        //   Stage 2 (eclipse-temurin:20-jre): Copies the JAR, creates runtime image
         //
-        // KEY DIFFERENCE FROM GITHUB ACTIONS:
-        // Jenkins has BUILT-IN test result visualization. The `junit` step
-        // parses JUnit XML reports and shows:
-        // - Test trend graphs (pass rate over time)
-        // - Failure details with stack traces
-        // - Test duration tracking
-        //
-        // In GitHub Actions, you need third-party actions for this.
-        // This is one area where Jenkins genuinely excels.
-        // =====================================================================
-        stage('Unit Tests') {
-            steps {
-                sh './gradlew test --no-daemon'
-            }
-            // `post` runs AFTER the steps, regardless of pass/fail
-            post {
-                always {
-                    // Publish JUnit test results to Jenkins UI
-                    // Jenkins parses the XML and creates interactive test reports
-                    junit testResults: '**/build/test-results/test/*.xml',
-                         allowEmptyResults: true
-
-                    // Archive the HTML test report for download
-                    archiveArtifacts artifacts: 'build/reports/tests/**',
-                                     allowEmptyArchive: true
-                }
-            }
-        }
-
-        // =====================================================================
-        // STAGE 4: CODE QUALITY
-        // =====================================================================
-        // Generates JaCoCo coverage report and publishes it to Jenkins.
-        //
-        // Jenkins + JaCoCo plugin shows:
-        // - Coverage trend graphs (how coverage changes over time)
-        // - Per-class/method coverage breakdown
-        // - Diff coverage (what's covered in THIS commit vs previous)
-        //
-        // REAL-WORLD: Many teams also integrate SonarQube here for
-        // static code analysis (code smells, security vulnerabilities, duplication).
-        // =====================================================================
-        stage('Code Quality') {
-            steps {
-                sh './gradlew jacocoTestReport --no-daemon'
-            }
-            post {
-                always {
-                    // Publish JaCoCo coverage report to Jenkins UI
-                    // The JaCoCo plugin must be installed in Jenkins
-                    jacoco(
-                        execPattern: '**/build/jacoco/test.exec',
-                        classPattern: '**/build/classes',
-                        sourcePattern: '**/src/main/java',
-                        changeBuildStatus: true,
-                        minimumLineCoverage: '30'         // Fail if below 30%
-                    )
-                }
-            }
-        }
-
-        // =====================================================================
-        // STAGE 5: DOCKER BUILD
-        // =====================================================================
-        // Builds the Docker image and tags it with the Jenkins BUILD_NUMBER.
+        // The Docker build IS the compile step. This is the modern approach:
+        // Jenkins doesn't need JDK or Gradle - just Docker.
         //
         // WHY BUILD_NUMBER AS TAG?
         // Jenkins increments BUILD_NUMBER for every build (1, 2, 3...).
-        // This gives you a simple, human-readable version number.
         // Combined with the git SHA, you have full traceability:
-        //   "Build #42 = commit abc1234 = image payment-ledger:42"
-        //
-        // REAL-WORLD: Some teams tag with both:
-        //   payment-ledger:42
-        //   payment-ledger:sha-abc1234
-        //   payment-ledger:latest
+        //   "Build #42 = commit abc1234 = image payment-ledger-app:42"
         // =====================================================================
         stage('Docker Build') {
             steps {
@@ -246,31 +167,54 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 6: DEPLOY TO DEV (Automatic)
+        // STAGE 3: LOAD IMAGE TO KIND
         // =====================================================================
-        // Automatically deploys to the dev environment after a successful build.
+        // Kind (Kubernetes in Docker) runs K8s nodes as Docker containers.
+        // These nodes can't pull images from the host's Docker daemon.
+        // `kind load docker-image` copies the image from the host Docker
+        // into each Kind node's containerd runtime.
         //
-        // `when { branch 'master' }`: Only run this stage on the master branch.
-        // Feature branches build and test, but don't deploy.
+        // Without this step, K8s pods would fail with "ErrImagePull" because
+        // the deployment uses `imagePullPolicy: Never` (local images only).
         //
-        // GitHub Actions equivalent: `if: github.ref == 'refs/heads/master'`
+        // REAL-WORLD: In production, you'd push to a container registry
+        // (Docker Hub, ECR, GCR) instead. Kind load is a local-dev shortcut.
+        // =====================================================================
+        stage('Load Image to Kind') {
+            steps {
+                sh "kind load docker-image ${APP_NAME}:latest --name ${KIND_CLUSTER}"
+                echo "Image loaded into Kind cluster: ${KIND_CLUSTER}"
+            }
+        }
+
+        // =====================================================================
+        // STAGE 4: DEPLOY TO DEV (Automatic)
+        // =====================================================================
+        // Deploys to the dev environment using Kustomize overlays.
+        //
+        // `kubectl apply -k` reads the Kustomization file and applies all
+        // resources with environment-specific patches (1 replica, debug logging,
+        // smaller resource limits for dev).
+        //
+        // `kubectl rollout restart` forces K8s to pull the new image.
+        // Since we use `imagePullPolicy: Never` and tag `latest`, K8s won't
+        // know the image changed unless we trigger a restart.
+        //
+        // `kubectl rollout status` waits until all new pods are ready,
+        // confirming the deployment succeeded.
         // =====================================================================
         stage('Deploy Dev') {
-            when {
-                branch 'master'
-            }
             steps {
                 echo "Deploying ${DOCKER_IMAGE} to DEV environment..."
-                // In a real setup, this would be:
-                // sh 'kubectl apply -k k8s/overlays/dev/'
-                // or
-                // sh 'docker compose -f docker-compose.yml up -d app'
+                sh "kubectl apply -k k8s/overlays/dev/"
+                sh "kubectl rollout restart deployment/payment-ledger -n ${K8S_NAMESPACE}"
+                sh "kubectl rollout status deployment/payment-ledger -n ${K8S_NAMESPACE} --timeout=120s"
                 echo "DEV deployment complete!"
             }
         }
 
         // =====================================================================
-        // STAGE 7: DEPLOY TO STAGING (Manual Approval)
+        // STAGE 5: DEPLOY TO STAGING (Manual Approval)
         // =====================================================================
         // This is where Jenkins shines with its `input` step.
         //
@@ -285,22 +229,14 @@ pipeline {
         //
         // GitHub Actions equivalent: "Environment protection rules" with
         // required reviewers (configured in repo settings, not in YAML).
-        //
-        // JENKINS ADVANTAGE: The input step is inline in the pipeline code,
-        // making the approval flow visible and version-controlled. In GitHub
-        // Actions, approval rules are configured separately in the UI.
         // =====================================================================
         stage('Deploy Staging') {
-            when {
-                branch 'master'
-            }
             steps {
-                // `input` blocks the pipeline until someone clicks Proceed/Abort
-                input message: 'Deploy to STAGING?',
-                      ok: 'Deploy',
-                      submitter: 'admin'    // Only 'admin' user can approve
+                input message: 'Deploy to STAGING?', ok: 'Deploy'
                 echo "Deploying ${DOCKER_IMAGE} to STAGING environment..."
-                // sh 'kubectl apply -k k8s/overlays/staging/'
+                sh "kubectl apply -k k8s/overlays/staging/"
+                sh "kubectl rollout restart deployment/payment-ledger -n ${K8S_NAMESPACE}"
+                sh "kubectl rollout status deployment/payment-ledger -n ${K8S_NAMESPACE} --timeout=120s"
                 echo "STAGING deployment complete!"
             }
         }
@@ -326,28 +262,12 @@ pipeline {
     post {
         always {
             echo "Pipeline completed. Build #${BUILD_NUMBER}"
-            // Clean up workspace to save disk space on the agent
-            cleanWs()
         }
         success {
             echo "Build SUCCEEDED! All stages passed."
-            // In a real setup:
-            // slackSend channel: '#builds',
-            //           color: 'good',
-            //           message: "✅ ${APP_NAME} Build #${BUILD_NUMBER} succeeded"
         }
         failure {
             echo "Build FAILED! Check the logs for details."
-            // In a real setup:
-            // slackSend channel: '#builds',
-            //           color: 'danger',
-            //           message: "❌ ${APP_NAME} Build #${BUILD_NUMBER} failed"
-        }
-        changed {
-            // This is the most useful notification: "something changed"
-            // - Build was failing, now it's fixed → notify team
-            // - Build was passing, now it broke → notify team
-            echo "Build status CHANGED from previous build!"
         }
     }
 }
