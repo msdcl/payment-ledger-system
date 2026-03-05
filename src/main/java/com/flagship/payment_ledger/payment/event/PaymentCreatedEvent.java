@@ -1,6 +1,9 @@
 package com.flagship.payment_ledger.payment.event;
 
 import com.flagship.payment_ledger.payment.Payment;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
 import lombok.Value;
 
 import java.math.BigDecimal;
@@ -16,6 +19,9 @@ import java.util.UUID;
  * Contains all information needed by consumers to process the event.
  */
 @Value
+@NoArgsConstructor(force = true)
+@AllArgsConstructor
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class PaymentCreatedEvent implements PaymentEvent {
     UUID eventId;
     UUID paymentId;

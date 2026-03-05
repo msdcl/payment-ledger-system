@@ -1,6 +1,9 @@
 package com.flagship.payment_ledger.payment.event;
 
 import com.flagship.payment_ledger.payment.Payment;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
 import lombok.Value;
 
 import java.math.BigDecimal;
@@ -16,6 +19,9 @@ import java.util.UUID;
  * Authorization indicates funds have been verified/reserved.
  */
 @Value
+@NoArgsConstructor(force = true)
+@AllArgsConstructor
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class PaymentAuthorizedEvent implements PaymentEvent {
     UUID eventId;
     UUID paymentId;

@@ -49,7 +49,7 @@
     </appender>
 
     <!-- Default profile: human-readable console output -->
-    <springProfile name="default,dev,test">
+    <springProfile name="default,dev,test,docker">
         <root level="INFO">
             <appender-ref ref="CONSOLE"/>
         </root>
