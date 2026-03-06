@@ -202,20 +202,9 @@ outbox_backlog_size 0
 idempotency_cache_total{result="hit"} 15
 ```
 
-## Implementation Phases
 
-| Phase | Name | Description |
-|-------|------|-------------|
-| 0 | Domain Model | Immutable payment entities, state machine |
-| 1 | Persistence | JPA entities, repositories, Flyway migrations |
-| 2 | Double-Entry Ledger | Balanced transactions, audit trail |
-| 3 | Idempotency | Redis + DB idempotency key handling |
-| 4 | Settlement Integration | Atomic payment + ledger operations |
-| 5 | Transactional Outbox | Reliable event publishing to Kafka |
-| 6 | Consumers | Idempotent event processing |
-| 7 | Observability | Metrics, logging, health checks |
-| 8 | Failure Scenarios | Resilience testing and documentation |
-| 9 | Documentation | This README and interview prep |
+
+
 
 ## Design Decisions
 
@@ -278,30 +267,6 @@ Result: Safe retry, no duplicate!
 | Database | Transaction fail | Full rollback | None |
 | App Crash | Mid-operation | Uncommitted work rolled back | None |
 
-## Configuration
-
-```properties
-# Database
-spring.datasource.url=jdbc:postgresql://localhost:5432/payment_ledger
-spring.datasource.username=postgres
-spring.datasource.password=postgres
-
-# Redis
-spring.data.redis.host=localhost
-spring.data.redis.port=6379
-
-# Kafka
-spring.kafka.bootstrap-servers=localhost:9092
-kafka.topic.payments=payments
-
-# Outbox
-outbox.publisher.enabled=true
-outbox.publisher.poll-interval-ms=1000
-outbox.publisher.batch-size=100
-
-# Observability
-management.endpoints.web.exposure.include=health,metrics,prometheus
-```
 
 ## Project Structure
 
@@ -368,13 +333,6 @@ Import the dashboard from `Documentation/grafana-dashboard.json` for:
 - Idempotency cache hit rate
 - Health status overview
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Write tests for your changes
-4. Ensure all tests pass
-5. Submit a pull request
 
 ## License
 
